@@ -99,9 +99,10 @@ async fn test_redis() -> Result<(), Box<dyn std::error::Error + 'static>> {
 ## 5. Call a service on the host
 
 When a dependency of your test suite runs on the host, add
-`with_host_access()` to expose the well-known `host.testcontainers.internal`
-alias inside the container. The container can then connect to host services by
-addressing that hostname and the original port number.
+`with_exposed_host_port(...)` to expose the well-known
+`host.testcontainers.internal` alias inside the container. The container can then
+connect to host services by addressing that hostname and the original port
+number.
 
 ```rust
 use std::net::TcpListener;
@@ -112,8 +113,8 @@ async fn calls_host_service() -> anyhow::Result<()> {
     let _listener = TcpListener::bind(("0.0.0.0", 18_080))?;
 
     let image = GenericImage::new("curlimages/curl", "latest")
-        .with_cmd(["curl", "-sSf", "http://host.testcontainers.internal:18080/health"]) 
-        .with_host_access();
+        .with_cmd(["curl", "-sSf", "http://host.testcontainers.internal:18080/health"])
+        .with_exposed_host_port(18_080);
 
     image.start().await?;
     Ok(())
@@ -122,13 +123,9 @@ async fn calls_host_service() -> anyhow::Result<()> {
 
 `testcontainers` automatically picks the best strategy available for the current
 Docker engine. Recent versions use Docker's `host-gateway` alias; older
-versions fall back to resolving the bridge gateway IP transparently.
-
-When you depend on future fallbacks (e.g. SSH tunnelling), use the
-`HostAccess` builder and `with_host_access_config(...)` to declare which host
-ports must remain reachable. The helpers
-`with_exposed_host_port`/`with_exposed_host_ports` forward to the same builder
-internally.
+versions fall back to resolving the bridge gateway IP transparently. Declaring
+host ports today also prepares the request for future fallbacks (such as SSH
+tunnels) without requiring additional changes later on.
 
 ## 6. Run the test
 

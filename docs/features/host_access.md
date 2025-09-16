@@ -5,12 +5,11 @@ that run on the host machine: HTTP mocks, external databases, tracing agents,
 or even your application under test. Docker assigns dynamic bridge IPs, so the
 host address is not stable and varies across platforms.
 
-`testcontainers` exposes the `with_host_access` helper to inject the
-`host.testcontainers.internal` alias into `/etc/hosts` inside every container.
-With this alias in place, code in the container can reach host services using a
-stable hostname and the original port number. For advanced scenarios the
-`HostAccess` builder and the `with_host_access_config` helper let you opt into
-additional behaviours (e.g. declaring host ports for future fallbacks).
+`testcontainers` exposes the `with_exposed_host_port` and
+`with_exposed_host_ports` helpers to declare which host ports should remain
+reachable from the container. Calling either helper injects the
+`host.testcontainers.internal` alias into `/etc/hosts`, allowing your code to
+use a stable hostname together with the original host port number.
 
 ```rust
 use std::net::TcpListener;
@@ -22,8 +21,8 @@ async fn container_can_call_host() -> anyhow::Result<()> {
     let _listener = TcpListener::bind(("0.0.0.0", 18_080))?;
 
     let image = GenericImage::new("curlimages/curl", "latest")
-        .with_cmd(["curl", "-sSf", "http://host.testcontainers.internal:18080"]) 
-        .with_host_access();
+        .with_cmd(["curl", "-sSf", "http://host.testcontainers.internal:18080"])
+        .with_exposed_host_port(18_080);
 
     image.start().await?; // any non-zero exit would bubble up here
     Ok(())
@@ -46,25 +45,9 @@ that you can fall back to manually wiring the host.
 
 ## Declaring host ports (future proofing)
 
-Use the `HostAccess` builder to record which host ports must remain reachable
-once additional fallbacks (such as SSH sidecars) ship. The first version simply
-records this intent on the `ContainerRequest` so that future releases can reuse
-the information without requiring changes to your tests.
-
-```rust
-use testcontainers::HostAccess;
-
-let request = GenericImage::new("alpine", "3.20").with_host_access_config(
-    HostAccess::alias_only().expose_ports([8080, 8081]),
-);
-assert_eq!(
-    request.host_access().expect("host access").exposed_ports(),
-    &[8080, 8081]
-);
-```
-
-The convenience helpers `with_exposed_host_port` and `with_exposed_host_ports`
-continue to work—they internally update the host access configuration for you.
+The helpers record exposed ports on the `ContainerRequest`. Future fallbacks,
+such as SSH sidecars, can leverage the same metadata without requiring any
+changes to your tests.
 
 ## Limitations
 

@@ -373,7 +373,7 @@ mod tests {
     async fn resolve_extra_hosts_use_keyword_when_supported() -> anyhow::Result<()> {
         let _guard = OverrideGuard::new(Some(true));
         let client = Client::lazy_client().await?;
-        let request = GenericImage::new("alpine", "3.20").with_host_access();
+        let request = GenericImage::new("alpine", "3.20").with_exposed_host_port(18_080);
 
         let hosts = resolve_extra_hosts(client.as_ref(), &request).await?;
 
@@ -390,7 +390,7 @@ mod tests {
     async fn resolve_extra_hosts_use_ip_when_not_supported() -> anyhow::Result<()> {
         let _guard = OverrideGuard::new(Some(false));
         let client = Client::lazy_client().await?;
-        let request = GenericImage::new("alpine", "3.20").with_host_access();
+        let request = GenericImage::new("alpine", "3.20").with_exposed_host_port(18_080);
 
         let hosts = resolve_extra_hosts(client.as_ref(), &request).await?;
 

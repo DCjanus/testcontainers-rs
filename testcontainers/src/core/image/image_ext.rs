@@ -6,7 +6,7 @@ use bollard_stubs::models::ResourcesUlimits;
 
 use crate::{
     core::{
-        containers::{request::HOST_ACCESS_ALIAS, HostAccess},
+        containers::request::HOST_ACCESS_ALIAS,
         copy::{CopyDataSource, CopyToContainer},
         healthcheck::Healthcheck,
         logs::consumer::LogConsumer,
@@ -22,27 +22,6 @@ pub enum ReuseDirective {
     Never,
     Always,
     CurrentSession,
-}
-
-fn apply_host_access<I: Image>(
-    mut container_req: ContainerRequest<I>,
-    host_access: HostAccess,
-) -> ContainerRequest<I> {
-    if host_access.injects_host_alias() {
-        container_req
-            .hosts
-            .insert(HOST_ACCESS_ALIAS.to_string(), Host::HostGateway);
-    } else {
-        container_req.hosts.remove(HOST_ACCESS_ALIAS);
-    }
-
-    if !host_access.injects_host_alias() && host_access.exposed_ports().is_empty() {
-        container_req.host_access = None;
-    } else {
-        container_req.host_access = Some(host_access);
-    }
-
-    container_req
 }
 
 #[cfg(feature = "reusable-containers")]
@@ -116,12 +95,6 @@ pub trait ImageExt<I: Image> {
 
     /// Adds a host to the container.
     fn with_host(self, key: impl Into<String>, value: impl Into<Host>) -> ContainerRequest<I>;
-
-    /// Enables the `host.testcontainers.internal` alias inside the container.
-    fn with_host_access(self) -> ContainerRequest<I>;
-
-    /// Applies an explicit host access configuration to the container request.
-    fn with_host_access_config(self, config: HostAccess) -> ContainerRequest<I>;
 
     /// Declares a host port to be made accessible to containers when host access fallbacks are in use.
     fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I>;
@@ -353,35 +326,23 @@ impl<RI: Into<ContainerRequest<I>>, I: Image> ImageExt<I> for RI {
         container_req
     }
 
-    fn with_host_access(self) -> ContainerRequest<I> {
-        let mut container_req = self.into();
-        let host_access = container_req
-            .host_access
-            .take()
-            .unwrap_or_default()
-            .with_host_alias(true);
-
-        apply_host_access(container_req, host_access)
-    }
-
-    fn with_host_access_config(self, config: HostAccess) -> ContainerRequest<I> {
-        apply_host_access(self.into(), config)
-    }
-
     fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I> {
         self.with_exposed_host_ports([port])
     }
 
     fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I> {
         let mut container_req = self.into();
-        let host_access = container_req
-            .host_access
-            .take()
-            .unwrap_or_else(HostAccess::alias_only)
-            .with_host_alias(true)
-            .expose_ports(ports);
+        let mut exposed = container_req.exposed_host_ports.unwrap_or_default();
+        exposed.extend(ports);
+        exposed.sort_unstable();
+        exposed.dedup();
 
-        apply_host_access(container_req, host_access)
+        container_req
+            .hosts
+            .insert(HOST_ACCESS_ALIAS.to_string(), Host::HostGateway);
+        container_req.exposed_host_ports = Some(exposed);
+
+        container_req
     }
 
     fn with_mount(self, mount: impl Into<Mount>) -> ContainerRequest<I> {

@@ -20,71 +20,6 @@ use crate::{
 
 pub const HOST_ACCESS_ALIAS: &str = "host.testcontainers.internal";
 
-/// Configuration for host access fallbacks.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HostAccess {
-    inject_host_alias: bool,
-    exposed_ports: Vec<u16>,
-}
-
-impl HostAccess {
-    /// Returns a configuration that injects the default host alias without exposing additional ports.
-    pub fn alias_only() -> Self {
-        Self {
-            inject_host_alias: true,
-            exposed_ports: Vec::new(),
-        }
-    }
-
-    /// Returns a configuration with host alias injection enabled (alias-only by default).
-    pub fn enable() -> Self {
-        Self::alias_only()
-    }
-
-    /// Returns a configuration with host alias injection disabled.
-    pub fn disabled() -> Self {
-        Self {
-            inject_host_alias: false,
-            exposed_ports: Vec::new(),
-        }
-    }
-
-    /// Enables host alias injection for the configuration.
-    pub fn with_host_alias(mut self, enabled: bool) -> Self {
-        self.inject_host_alias = enabled;
-        self
-    }
-
-    /// Declares a single host port to be exposed to containers when fallbacks are used.
-    pub fn expose_port(mut self, port: u16) -> Self {
-        self.exposed_ports.push(port);
-        self.normalize_ports();
-        self
-    }
-
-    /// Declares multiple host ports to be exposed to containers when fallbacks are used.
-    pub fn expose_ports(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
-        self.exposed_ports.extend(ports);
-        self.normalize_ports();
-        self
-    }
-
-    /// Returns whether the configuration injects the host alias.
-    pub fn injects_host_alias(&self) -> bool {
-        self.inject_host_alias
-    }
-
-    /// Returns the declared host ports in ascending order.
-    pub fn exposed_ports(&self) -> &[u16] {
-        &self.exposed_ports
-    }
-
-    fn normalize_ports(&mut self) {
-        self.exposed_ports.sort_unstable();
-        self.exposed_ports.dedup();
-    }
-}
-
 /// Represents a request to start a container, allowing customization of the container.
 #[must_use]
 pub struct ContainerRequest<I: Image> {
@@ -100,7 +35,7 @@ pub struct ContainerRequest<I: Image> {
     pub(crate) mounts: Vec<Mount>,
     pub(crate) copy_to_sources: Vec<CopyToContainer>,
     pub(crate) ports: Option<Vec<PortMapping>>,
-    pub(crate) host_access: Option<HostAccess>,
+    pub(crate) exposed_host_ports: Option<Vec<u16>>,
     pub(crate) ulimits: Option<Vec<ResourcesUlimits>>,
     pub(crate) privileged: bool,
     pub(crate) cap_add: Option<Vec<String>>,
@@ -194,11 +129,7 @@ impl<I: Image> ContainerRequest<I> {
     }
 
     pub fn exposed_host_ports(&self) -> Option<&[u16]> {
-        self.host_access.as_ref().map(HostAccess::exposed_ports)
-    }
-
-    pub fn host_access(&self) -> Option<&HostAccess> {
-        self.host_access.as_ref()
+        self.exposed_host_ports.as_deref()
     }
 
     pub fn privileged(&self) -> bool {
@@ -319,7 +250,7 @@ impl<I: Image> From<I> for ContainerRequest<I> {
             mounts: Vec::new(),
             copy_to_sources: Vec::new(),
             ports: None,
-            host_access: None,
+            exposed_host_ports: None,
             ulimits: None,
             privileged: false,
             cap_add: None,
@@ -375,7 +306,7 @@ impl<I: Image + Debug> Debug for ContainerRequest<I> {
             .field("hosts", &self.hosts)
             .field("mounts", &self.mounts)
             .field("ports", &self.ports)
-            .field("host_access", &self.host_access)
+            .field("exposed_host_ports", &self.exposed_host_ports)
             .field("ulimits", &self.ulimits)
             .field("privileged", &self.privileged)
             .field("cap_add", &self.cap_add)
