@@ -135,6 +135,45 @@ fn generic_image_running_with_extra_hosts_added() -> anyhow::Result<()> {
 }
 
 #[test]
+fn generic_image_with_host_access_injects_alias() -> anyhow::Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    let image = GenericImage::new("alpine", "3.20")
+        .with_cmd(["/bin/sh", "-c", "sleep 2"])
+        .with_host_access();
+
+    let container = image.start()?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let docker = runtime.block_on(testcontainers::core::client::docker_client_instance())?;
+    let details = runtime.block_on(docker.inspect_container(
+        container.id(),
+        None::<bollard::query_parameters::InspectContainerOptions>,
+    ))?;
+    let extra_hosts = details
+        .host_config
+        .expect("HostConfig")
+        .extra_hosts
+        .unwrap_or_default();
+
+    let alias_prefix = format!("{}:", testcontainers::core::HOST_ACCESS_ALIAS);
+    assert!(extra_hosts
+        .iter()
+        .any(|entry| entry.starts_with(&alias_prefix)));
+
+    Ok(())
+}
+
+#[test]
+fn exposed_host_ports_are_stored_deduplicated() {
+    let request = GenericImage::new("alpine", "3.20")
+        .with_exposed_host_port(8080)
+        .with_exposed_host_ports([8081, 8080]);
+
+    let ports = request.exposed_host_ports().expect("host ports present");
+    assert_eq!(ports, &[8080, 8081]);
+}
+
+#[test]
 fn generic_image_port_not_exposed() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 

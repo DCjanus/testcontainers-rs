@@ -18,6 +18,8 @@ use crate::{
     Image, TestcontainersError,
 };
 
+pub const HOST_ACCESS_ALIAS: &str = "host.testcontainers.internal";
+
 /// Represents a request to start a container, allowing customization of the container.
 #[must_use]
 pub struct ContainerRequest<I: Image> {
@@ -33,6 +35,7 @@ pub struct ContainerRequest<I: Image> {
     pub(crate) mounts: Vec<Mount>,
     pub(crate) copy_to_sources: Vec<CopyToContainer>,
     pub(crate) ports: Option<Vec<PortMapping>>,
+    pub(crate) exposed_host_ports: Option<Vec<u16>>,
     pub(crate) ulimits: Option<Vec<ResourcesUlimits>>,
     pub(crate) privileged: bool,
     pub(crate) cap_add: Option<Vec<String>>,
@@ -123,6 +126,10 @@ impl<I: Image> ContainerRequest<I> {
 
     pub fn ports(&self) -> Option<&Vec<PortMapping>> {
         self.ports.as_ref()
+    }
+
+    pub fn exposed_host_ports(&self) -> Option<&[u16]> {
+        self.exposed_host_ports.as_deref()
     }
 
     pub fn privileged(&self) -> bool {
@@ -243,6 +250,7 @@ impl<I: Image> From<I> for ContainerRequest<I> {
             mounts: Vec::new(),
             copy_to_sources: Vec::new(),
             ports: None,
+            exposed_host_ports: None,
             ulimits: None,
             privileged: false,
             cap_add: None,
@@ -298,6 +306,7 @@ impl<I: Image + Debug> Debug for ContainerRequest<I> {
             .field("hosts", &self.hosts)
             .field("mounts", &self.mounts)
             .field("ports", &self.ports)
+            .field("exposed_host_ports", &self.exposed_host_ports)
             .field("ulimits", &self.ulimits)
             .field("privileged", &self.privileged)
             .field("cap_add", &self.cap_add)

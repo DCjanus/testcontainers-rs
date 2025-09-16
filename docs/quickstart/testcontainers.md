@@ -96,6 +96,34 @@ async fn test_redis() -> Result<(), Box<dyn std::error::Error + 'static>> {
 * `get_host_port_ipv4` returns the mapped host port for an internal port of this docker container.
   In this case it returns the port that was exposed by the container.
 
-## 5. Run the test
+## 5. Call a service on the host
+
+When a dependency of your test suite runs on the host, add
+`with_host_access()` to expose the well-known `host.testcontainers.internal`
+alias inside the container. The container can then connect to host services by
+addressing that hostname and the original port number.
+
+```rust
+use std::net::TcpListener;
+use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
+
+#[tokio::test]
+async fn calls_host_service() -> anyhow::Result<()> {
+    let _listener = TcpListener::bind(("0.0.0.0", 18_080))?;
+
+    let image = GenericImage::new("curlimages/curl", "latest")
+        .with_cmd(["curl", "-sSf", "http://host.testcontainers.internal:18080/health"]) 
+        .with_host_access();
+
+    image.start().await?;
+    Ok(())
+}
+```
+
+`testcontainers` automatically picks the best strategy available for the current
+Docker engine. Recent versions use Docker's `host-gateway` alias; older
+versions fall back to resolving the bridge gateway IP transparently.
+
+## 6. Run the test
 
 You can run the test via `cargo test`

@@ -12,6 +12,7 @@ use crate::{
         client::{Client, ClientError},
         copy::CopyToContainer,
         error::{Result, WaitContainerError},
+        host_access,
         mounts::{AccessMode, Mount, MountType},
         network::Network,
         CgroupnsMode, ContainerState,
@@ -77,8 +78,9 @@ where
         let client = Client::lazy_client().await?;
         let mut create_options: Option<CreateContainerOptions> = None;
 
-        let extra_hosts: Vec<_> = container_req
-            .hosts()
+        let extra_hosts: Vec<_> = host_access::resolve_extra_hosts(client.as_ref(), &container_req)
+            .await?
+            .into_iter()
             .map(|(key, value)| format!("{key}:{value}"))
             .collect();
 

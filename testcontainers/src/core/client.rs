@@ -10,7 +10,7 @@ use bollard::{
     container::LogOutput,
     errors::Error as BollardError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
-    models::{ContainerCreateBody, NetworkCreateRequest},
+    models::{ContainerCreateBody, NetworkCreateRequest, SystemVersion},
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
         CreateImageOptionsBuilder, InspectContainerOptions, InspectContainerOptionsBuilder,
@@ -79,6 +79,8 @@ pub enum ClientError {
     ListContainers(BollardError),
     #[error("failed to create a container: {0}")]
     CreateContainer(BollardError),
+    #[error("failed to query docker version: {0}")]
+    Version(BollardError),
     #[error("failed to remove a container: {0}")]
     RemoveContainer(BollardError),
     #[error("failed to start a container: {0}")]
@@ -142,6 +144,10 @@ impl Client {
 
     pub(crate) fn logs(&self, id: &str, follow: bool) -> LogStream {
         self.logs_stream(id, None, follow)
+    }
+
+    pub(crate) async fn docker_version(&self) -> Result<SystemVersion, ClientError> {
+        self.bollard.version().await.map_err(ClientError::Version)
     }
 
     pub(crate) async fn ports(&self, id: &str) -> Result<Ports, ClientError> {

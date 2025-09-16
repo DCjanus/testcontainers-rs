@@ -6,6 +6,7 @@ use bollard_stubs::models::ResourcesUlimits;
 
 use crate::{
     core::{
+        containers::request::HOST_ACCESS_ALIAS,
         copy::{CopyDataSource, CopyToContainer},
         healthcheck::Healthcheck,
         logs::consumer::LogConsumer,
@@ -94,6 +95,15 @@ pub trait ImageExt<I: Image> {
 
     /// Adds a host to the container.
     fn with_host(self, key: impl Into<String>, value: impl Into<Host>) -> ContainerRequest<I>;
+
+    /// Enables the `host.testcontainers.internal` alias inside the container.
+    fn with_host_access(self) -> ContainerRequest<I>;
+
+    /// Declares a host port to be made accessible to containers when host access fallbacks are in use.
+    fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I>;
+
+    /// Declares multiple host ports to be made accessible to containers when host access fallbacks are in use.
+    fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I>;
 
     /// Adds a mount to the container.
     fn with_mount(self, mount: impl Into<Mount>) -> ContainerRequest<I>;
@@ -317,6 +327,31 @@ impl<RI: Into<ContainerRequest<I>>, I: Image> ImageExt<I> for RI {
         let mut container_req = self.into();
         container_req.hosts.insert(key.into(), value.into());
         container_req
+    }
+
+    fn with_host_access(self) -> ContainerRequest<I> {
+        let mut container_req = self.into();
+        container_req
+            .hosts
+            .insert(HOST_ACCESS_ALIAS.to_string(), Host::HostGateway);
+        container_req
+    }
+
+    fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I> {
+        self.with_exposed_host_ports([port])
+    }
+
+    fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I> {
+        let container_req = self.into();
+        let mut exposed = container_req.exposed_host_ports.unwrap_or_default();
+        exposed.extend(ports);
+        exposed.sort_unstable();
+        exposed.dedup();
+
+        ContainerRequest {
+            exposed_host_ports: Some(exposed),
+            ..container_req
+        }
     }
 
     fn with_mount(self, mount: impl Into<Mount>) -> ContainerRequest<I> {

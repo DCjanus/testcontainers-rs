@@ -23,6 +23,7 @@ pub(crate) mod copy;
 pub(crate) mod env;
 pub mod error;
 pub(crate) mod healthcheck;
+pub(crate) mod host_access;
 pub mod logs;
 pub(crate) mod mounts;
 pub(crate) mod network;
