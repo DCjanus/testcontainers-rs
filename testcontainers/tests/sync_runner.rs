@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use testcontainers::HostAccess;
 use testcontainers::{
     core::{
         logs::{consumer::logging_consumer::LoggingConsumer, LogFrame},
@@ -171,6 +172,9 @@ fn exposed_host_ports_are_stored_deduplicated() {
 
     let ports = request.exposed_host_ports().expect("host ports present");
     assert_eq!(ports, &[8080, 8081]);
+
+    let host_access = request.host_access().expect("host access present");
+    assert!(host_access.injects_host_alias());
 }
 
 #[test]
@@ -191,6 +195,25 @@ fn generic_image_port_not_exposed() -> anyhow::Result<()> {
     let res = node.get_host_port_ipv4(target_port.tcp());
     assert!(res.is_err());
     Ok(())
+}
+
+#[test]
+fn host_access_config_builder_exposes_ports() {
+    let request = GenericImage::new("alpine", "3.20")
+        .with_host_access_config(HostAccess::alias_only().expose_ports([8080, 8081]));
+
+    let host_access = request.host_access().expect("host access present");
+    assert_eq!(host_access.exposed_ports(), &[8080, 8081]);
+    assert!(host_access.injects_host_alias());
+}
+
+#[test]
+fn host_access_preserves_ports_when_reapplying_alias() {
+    let request = GenericImage::new("alpine", "3.20")
+        .with_host_access_config(HostAccess::alias_only().expose_port(8080))
+        .with_host_access();
+
+    assert_eq!(request.exposed_host_ports().unwrap(), &[8080]);
 }
 
 #[test]

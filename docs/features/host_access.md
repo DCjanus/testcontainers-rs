@@ -8,7 +8,9 @@ host address is not stable and varies across platforms.
 `testcontainers` exposes the `with_host_access` helper to inject the
 `host.testcontainers.internal` alias into `/etc/hosts` inside every container.
 With this alias in place, code in the container can reach host services using a
-stable hostname and the original port number.
+stable hostname and the original port number. For advanced scenarios the
+`HostAccess` builder and the `with_host_access_config` helper let you opt into
+additional behaviours (e.g. declaring host ports for future fallbacks).
 
 ```rust
 use std::net::TcpListener;
@@ -44,18 +46,25 @@ that you can fall back to manually wiring the host.
 
 ## Declaring host ports (future proofing)
 
-The `with_exposed_host_port` and `with_exposed_host_ports` helpers let you express
-which host ports must remain reachable once additional fallbacks (such as SSH
-sidecars) ship. The first version simply records this intent on the
-`ContainerRequest` so that future releases can reuse the information without
-requiring changes to your tests.
+Use the `HostAccess` builder to record which host ports must remain reachable
+once additional fallbacks (such as SSH sidecars) ship. The first version simply
+records this intent on the `ContainerRequest` so that future releases can reuse
+the information without requiring changes to your tests.
 
 ```rust
-let request = GenericImage::new("alpine", "3.20")
-    .with_host_access()
-    .with_exposed_host_ports([8080, 8081]);
-assert_eq!(request.exposed_host_ports().unwrap(), &[8080, 8081]);
+use testcontainers::HostAccess;
+
+let request = GenericImage::new("alpine", "3.20").with_host_access_config(
+    HostAccess::alias_only().expose_ports([8080, 8081]),
+);
+assert_eq!(
+    request.host_access().expect("host access").exposed_ports(),
+    &[8080, 8081]
+);
 ```
+
+The convenience helpers `with_exposed_host_port` and `with_exposed_host_ports`
+continue to work—they internally update the host access configuration for you.
 
 ## Limitations
 

@@ -124,6 +124,12 @@ async fn calls_host_service() -> anyhow::Result<()> {
 Docker engine. Recent versions use Docker's `host-gateway` alias; older
 versions fall back to resolving the bridge gateway IP transparently.
 
+When you depend on future fallbacks (e.g. SSH tunnelling), use the
+`HostAccess` builder and `with_host_access_config(...)` to declare which host
+ports must remain reachable. The helpers
+`with_exposed_host_port`/`with_exposed_host_ports` forward to the same builder
+internally.
+
 ## 6. Run the test
 
 You can run the test via `cargo test`

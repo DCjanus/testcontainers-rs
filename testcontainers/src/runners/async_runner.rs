@@ -78,12 +78,6 @@ where
         let client = Client::lazy_client().await?;
         let mut create_options: Option<CreateContainerOptions> = None;
 
-        let extra_hosts: Vec<_> = host_access::resolve_extra_hosts(client.as_ref(), &container_req)
-            .await?
-            .into_iter()
-            .map(|(key, value)| format!("{key}:{value}"))
-            .collect();
-
         let labels = HashMap::<String, String>::from_iter(
             container_req
                 .labels()
@@ -143,7 +137,7 @@ where
             labels: Some(labels),
             host_config: Some(HostConfig {
                 privileged: Some(container_req.privileged()),
-                extra_hosts: Some(extra_hosts),
+                extra_hosts: None,
                 cgroupns_mode: container_req.cgroupns_mode().map(|mode| mode.into()),
                 userns_mode: container_req.userns_mode().map(|v| v.to_string()),
                 cap_add: container_req.cap_add().cloned(),
@@ -178,6 +172,17 @@ where
         } else {
             None
         };
+
+        let extra_hosts: Vec<_> = host_access::resolve_extra_hosts(client.as_ref(), &container_req)
+            .await?
+            .into_iter()
+            .map(|(key, value)| format!("{key}:{value}"))
+            .collect();
+
+        config.host_config = config.host_config.map(|mut host_config| {
+            host_config.extra_hosts = Some(extra_hosts);
+            host_config
+        });
 
         // name of the container
         if let Some(name) = container_req.container_name() {
