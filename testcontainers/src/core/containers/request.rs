@@ -33,6 +33,8 @@ pub struct ContainerRequest<I: Image> {
     pub(crate) mounts: Vec<Mount>,
     pub(crate) copy_to_sources: Vec<CopyToContainer>,
     pub(crate) ports: Option<Vec<PortMapping>>,
+    #[cfg(feature = "host-expose")]
+    pub(crate) host_port_exposures: Option<Vec<u16>>,
     pub(crate) ulimits: Option<Vec<ResourcesUlimits>>,
     pub(crate) privileged: bool,
     pub(crate) cap_add: Option<Vec<String>>,
@@ -123,6 +125,13 @@ impl<I: Image> ContainerRequest<I> {
 
     pub fn ports(&self) -> Option<&Vec<PortMapping>> {
         self.ports.as_ref()
+    }
+
+    #[cfg(feature = "host-expose")]
+    pub fn host_port_exposures(&self) -> Option<&[u16]> {
+        self.host_port_exposures
+            .as_ref()
+            .map(|ports| ports.as_slice())
     }
 
     pub fn privileged(&self) -> bool {
@@ -243,6 +252,8 @@ impl<I: Image> From<I> for ContainerRequest<I> {
             mounts: Vec::new(),
             copy_to_sources: Vec::new(),
             ports: None,
+            #[cfg(feature = "host-expose")]
+            host_port_exposures: None,
             ulimits: None,
             privileged: false,
             cap_add: None,
@@ -297,8 +308,14 @@ impl<I: Image + Debug> Debug for ContainerRequest<I> {
             .field("env_vars", &self.env_vars)
             .field("hosts", &self.hosts)
             .field("mounts", &self.mounts)
-            .field("ports", &self.ports)
-            .field("ulimits", &self.ulimits)
+            .field("ports", &self.ports);
+
+        #[cfg(feature = "host-expose")]
+        {
+            repr.field("host_port_exposures", &self.host_port_exposures);
+        }
+
+        repr.field("ulimits", &self.ulimits)
             .field("privileged", &self.privileged)
             .field("cap_add", &self.cap_add)
             .field("cap_drop", &self.cap_drop)

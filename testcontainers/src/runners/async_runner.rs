@@ -8,6 +8,9 @@ use bollard::{
     query_parameters::{CreateContainerOptions, CreateContainerOptionsBuilder},
 };
 
+#[cfg(feature = "host-expose")]
+use crate::core::containers::host::HostPortExposure;
+
 use crate::{
     core::{
         client::{Client, ClientError},
@@ -73,7 +76,13 @@ where
     I: Image,
 {
     async fn start(self) -> Result<ContainerAsync<I>> {
+        #[cfg(feature = "host-expose")]
+        let mut container_req = self.into();
+        #[cfg(not(feature = "host-expose"))]
         let container_req = self.into();
+
+        #[cfg(feature = "host-expose")]
+        let host_port_exposure = HostPortExposure::setup(&mut container_req).await?;
 
         let client = Client::lazy_client().await?;
         let mut create_options: Option<CreateContainerOptions> = None;
@@ -132,6 +141,8 @@ where
                         client,
                         container_req,
                         network,
+                        #[cfg(feature = "host-expose")]
+                        host_port_exposure,
                     ));
                 }
             }
@@ -328,8 +339,15 @@ where
         tokio::time::timeout(startup_timeout, async {
             client.start_container(&container_id).await?;
 
-            let container =
-                ContainerAsync::new(container_id, client.clone(), container_req, network).await?;
+            let container = ContainerAsync::new(
+                container_id,
+                client.clone(),
+                container_req,
+                network,
+                #[cfg(feature = "host-expose")]
+                host_port_exposure,
+            )
+            .await?;
 
             let state = ContainerState::from_container(&container).await?;
             for cmd in container.image().exec_after_start(state)? {

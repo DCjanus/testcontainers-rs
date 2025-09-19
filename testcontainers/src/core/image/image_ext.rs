@@ -117,6 +117,20 @@ pub trait ImageExt<I: Image> {
     fn with_mapped_port(self, host_port: u16, container_port: ContainerPort)
         -> ContainerRequest<I>;
 
+    /// Declares a host port that should be reachable from inside the container.
+    ///
+    /// This functionality is only available when the `host-expose` feature is enabled.
+    #[cfg(feature = "host-expose")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "host-expose")))]
+    fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I>;
+
+    /// Declares multiple host ports that should be reachable from inside the container.
+    ///
+    /// This functionality is only available when the `host-expose` feature is enabled.
+    #[cfg(feature = "host-expose")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "host-expose")))]
+    fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I>;
+
     /// Adds a resource ulimit to the container.
     ///
     /// # Examples
@@ -351,6 +365,25 @@ impl<RI: Into<ContainerRequest<I>>, I: Image> ImageExt<I> for RI {
             ports: Some(ports),
             ..container_req
         }
+    }
+
+    #[cfg(feature = "host-expose")]
+    fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I> {
+        self.with_exposed_host_ports([port])
+    }
+
+    #[cfg(feature = "host-expose")]
+    fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I> {
+        let mut container_req = self.into();
+        let exposures = container_req
+            .host_port_exposures
+            .get_or_insert_with(Vec::new);
+
+        exposures.extend(ports);
+        exposures.sort_unstable();
+        exposures.dedup();
+
+        container_req
     }
 
     fn with_ulimit(self, name: &str, soft: i64, hard: Option<i64>) -> ContainerRequest<I> {
