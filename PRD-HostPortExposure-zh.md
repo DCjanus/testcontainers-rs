@@ -8,6 +8,22 @@
 - 提供最小 API：仅声明需要访问的宿主端口，其余自动完成。
 - 实现路径唯一：SSHD 侧车 + SSH 反向端口转发（基于 ssh2）。
 
+### 当前进展（2025-02-14）
+
+- `host-expose` / `host-expose-vendored-openssl` 特性已接入，`ssh2` 作为可选依赖。
+- `ContainerRequest` / `ImageExt` 已新增 `with_exposed_host_port(s)` API。
+- `AsyncRunner` 流程可自动：
+  - 启动 `testcontainers/sshd:1.3.0` 侧车并与目标容器共享网络。
+  - 生成随机 root 密码，通过密码认证建立单个 SSH 会话（开启 keepalive）。
+  - 为每个声明端口创建反向转发线程，并在容器 Drop 时清理。
+- 自动写入 `/etc/hosts`：`host.testcontainers.internal` → 侧车 IP，已验证 cargo check。
+
+**待办**
+
+- `SyncRunner` 支持、容器复用/跨网络等场景。
+- 集成测试及用户文档（FAQ/排错）。
+- 事件日志/metrics 的补充观测能力。
+
 ### 范围与非目标
 
 - 不覆盖用户显式的 `with_host(...)` 设置。
@@ -58,12 +74,12 @@ ssh2 = { version = "0.9", optional = true }
 
 - `AllowTcpForwarding yes`
 - `GatewayPorts clientspecified`（允许远端转发绑定到 0.0.0.0）
-- 仅公钥登录（禁用密码）
+- 支持密码登录（当前实现为随机 root 密码，后续可扩展为密钥登录）
 
 ### 基于 ssh2 的实现（关键步骤）
 
 - 会话建立：
-  - `Session::new()` → `set_tcp_stream(TcpStream::connect("127.0.0.1:<host_ssh_port>"))` → `handshake()` → `userauth_pubkey_memory()`。
+  - `Session::new()` → `set_tcp_stream(TcpStream::connect("127.0.0.1:<host_ssh_port>"))` → `handshake()` → `userauth_password("root", <random-password>)`。
   - 可启用 keepalive：`session.set_keepalive(true, 10)`。
 - 远端监听（等价于 -R）：
   - `let (listener, bound_port) = session.channel_forward_listen(remote_port, Some("0.0.0.0"), None)?;`
@@ -86,16 +102,16 @@ ssh2 = { version = "0.9", optional = true }
   - 新增：`with_exposed_host_port`、`with_exposed_host_ports`。
 - `testcontainers/src/runners/{async_runner,sync_runner}.rs`
   - 创建/复用网络；启动侧车（`testcontainers/sshd:1.3.0`）。
-  - 生成一次性密钥，注入 `authorized_keys`；建立 SSH 会话与反向转发（多端口复用单会话，多个 `-R`）。
+  - 生成一次性密码（root），通过密码认证建立 SSH 会话并复用注册多个 `-R` 转发。
   - 注入 hosts：`host.testcontainers.internal` → 侧车 IP。
-  - 生命周期：侧车容器与 SSH 会话随主容器清理。
+  - 生命周期：容器 Drop 时断开会话、回收转发线程与侧车。
 
 ---
 
 ## 运行时流程
 
 1. 解析配置（API 端口清单）。
-2. 准备网络与侧车；注入密钥；宿主建立 SSH 会话与反向端口转发；写入 hosts。
+2. 准备网络与侧车；生成随机密码、建立 SSH 会话与反向端口转发；写入 hosts。
 3. 启动被测容器，进入既有 wait/inspect 流程。
 4. 清理：关闭 SSH 会话，停止侧车与临时网络（按复用策略）。
 
@@ -123,7 +139,7 @@ ssh2 = { version = "0.9", optional = true }
 ## 性能与安全
 
 - 额外 1 个侧车容器 + 1 条 SSH 会话；仅在声明端口时启用。
-- 禁用密码、一次性密钥、仅开启必要反向转发；会话随测试生命周期清理。
+- 使用一次性随机密码、仅开启必要反向转发；会话随测试生命周期清理。
 
 ---
 
