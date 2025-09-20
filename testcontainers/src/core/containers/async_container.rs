@@ -3,7 +3,6 @@ use std::{fmt, net::IpAddr, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio_stream::StreamExt;
 
-#[cfg(feature = "host-expose")]
 use super::host::HostPortExposure;
 
 use crate::{
@@ -45,7 +44,6 @@ pub struct ContainerAsync<I: Image> {
     #[allow(dead_code)]
     network: Option<Arc<Network>>,
     dropped: bool,
-    #[cfg(feature = "host-expose")]
     host_port_exposure: Option<HostPortExposure>,
     #[cfg(feature = "reusable-containers")]
     reuse: crate::ReuseDirective,
@@ -62,7 +60,7 @@ where
         docker_client: Arc<Client>,
         container_req: ContainerRequest<I>,
         network: Option<Arc<Network>>,
-        #[cfg(feature = "host-expose")] host_port_exposure: Option<HostPortExposure>,
+        host_port_exposure: Option<HostPortExposure>,
     ) -> Result<ContainerAsync<I>> {
         let ready_conditions = container_req.ready_conditions();
         let container = Self::construct(
@@ -70,7 +68,6 @@ where
             docker_client,
             container_req,
             network,
-            #[cfg(feature = "host-expose")]
             host_port_exposure,
         );
         let state = ContainerState::from_container(&container).await?;
@@ -86,7 +83,7 @@ where
         docker_client: Arc<Client>,
         mut container_req: ContainerRequest<I>,
         network: Option<Arc<Network>>,
-        #[cfg(feature = "host-expose")] host_port_exposure: Option<HostPortExposure>,
+        host_port_exposure: Option<HostPortExposure>,
     ) -> ContainerAsync<I> {
         #[cfg(feature = "reusable-containers")]
         let reuse = container_req.reuse();
@@ -98,7 +95,6 @@ where
             docker_client,
             network,
             dropped: false,
-            #[cfg(feature = "host-expose")]
             host_port_exposure,
             #[cfg(feature = "reusable-containers")]
             reuse,
@@ -425,7 +421,6 @@ where
             .field("network", &self.network)
             .field("dropped", &self.dropped);
 
-        #[cfg(feature = "host-expose")]
         repr.field(
             "host_port_exposure",
             &self.host_port_exposure.as_ref().map(|_| true),
@@ -454,7 +449,6 @@ where
             }
         }
 
-        #[cfg(feature = "host-expose")]
         if let Some(mut exposure) = self.host_port_exposure.take() {
             exposure.shutdown();
         }

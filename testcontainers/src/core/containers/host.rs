@@ -1,5 +1,3 @@
-#![cfg(feature = "host-expose")]
-
 use std::{
     collections::HashMap,
     convert::TryFrom,

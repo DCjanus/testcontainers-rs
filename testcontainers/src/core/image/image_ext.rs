@@ -118,17 +118,9 @@ pub trait ImageExt<I: Image> {
         -> ContainerRequest<I>;
 
     /// Declares a host port that should be reachable from inside the container.
-    ///
-    /// This functionality is only available when the `host-expose` feature is enabled.
-    #[cfg(feature = "host-expose")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "host-expose")))]
     fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I>;
 
     /// Declares multiple host ports that should be reachable from inside the container.
-    ///
-    /// This functionality is only available when the `host-expose` feature is enabled.
-    #[cfg(feature = "host-expose")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "host-expose")))]
     fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I>;
 
     /// Adds a resource ulimit to the container.
@@ -367,12 +359,10 @@ impl<RI: Into<ContainerRequest<I>>, I: Image> ImageExt<I> for RI {
         }
     }
 
-    #[cfg(feature = "host-expose")]
     fn with_exposed_host_port(self, port: u16) -> ContainerRequest<I> {
         self.with_exposed_host_ports([port])
     }
 
-    #[cfg(feature = "host-expose")]
     fn with_exposed_host_ports(self, ports: impl IntoIterator<Item = u16>) -> ContainerRequest<I> {
         let mut container_req = self.into();
         let exposures = container_req
