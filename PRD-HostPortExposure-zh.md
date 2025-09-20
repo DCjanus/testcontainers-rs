@@ -6,16 +6,16 @@
 
 - 容器需要以统一主机名访问宿主机端口，降低测试网络配置复杂度。
 - 提供最小 API：仅声明需要访问的宿主端口，其余自动完成。
-- 实现路径唯一：SSHD 侧车 + SSH 反向端口转发（基于 ssh2）。
+- 实现路径唯一：SSHD 侧车 + SSH 反向端口转发（基于 russh）。
 
 ### 当前进展（2025-02-14）
 
-- `host-expose` / `host-expose-vendored-openssl` 特性已接入，`ssh2` 作为可选依赖。
+- `host-expose` / `host-expose-vendored-openssl` 特性已接入，`russh` 作为可选依赖。
 - `ContainerRequest` / `ImageExt` 已新增 `with_exposed_host_port(s)` API。
 - `AsyncRunner` 流程可自动：
   - 启动 `testcontainers/sshd:1.3.0` 侧车并与目标容器共享网络。
   - 生成随机 root 密码，通过密码认证建立单个 SSH 会话（开启 keepalive）。
-  - 为每个声明端口创建反向转发线程，并在容器 Drop 时清理。
+  - 为每个声明端口创建反向转发任务，并在容器 Drop 时清理。
 - 自动写入 `/etc/hosts`：`host.testcontainers.internal` → 侧车 IP，已验证 cargo check。
 
 **待办**
@@ -43,21 +43,21 @@
 
 - 默认不启用 host 暴露功能，避免引入 OpenSSL。
 - Features（示例）：
-  - `host-expose`：启用“宿主端口访问”并打开可选依赖 `ssh2`。
-  - `host-expose-vendored-openssl`：在 `host-expose` 基础上启用 `ssh2/vendored-openssl`，静态捆绑 OpenSSL。
+  - `host-expose`：启用“宿主端口访问”并打开可选依赖 `russh`。
+  - `host-expose-vendored-openssl`：兼容旧配置，等价于 `host-expose`。
 - Cargo.toml（示意）：
 
 ```toml
 [features]
 default = []
-host-expose = ["ssh2"]
-host-expose-vendored-openssl = ["host-expose", "ssh2/vendored-openssl"]
+host-expose = ["russh"]
+host-expose-vendored-openssl = ["host-expose"]
 
 [dependencies]
-ssh2 = { version = "0.9", optional = true }
+russh = { version = "0.54", default-features = false, features = ["ring", "rsa"], optional = true }
 ```
 
-- 说明：`ssh2` 依赖 OpenSSL（支持 vendored 方案）。仅当 `host-expose` 启用时编译相关代码。
+- 说明：`russh` 为纯 Rust 实现，不再需要 OpenSSL。仅当 `host-expose` 启用时编译相关代码。
 
 ---
 
@@ -76,21 +76,19 @@ ssh2 = { version = "0.9", optional = true }
 - `GatewayPorts clientspecified`（允许远端转发绑定到 0.0.0.0）
 - 支持密码登录（当前实现为随机 root 密码，后续可扩展为密钥登录）
 
-### 基于 ssh2 的实现（关键步骤）
+### 基于 russh 的实现（关键步骤）
 
 - 会话建立：
-  - `Session::new()` → `set_tcp_stream(TcpStream::connect("127.0.0.1:<host_ssh_port>"))` → `handshake()` → `userauth_password("root", <random-password>)`。
-  - 可启用 keepalive：`session.set_keepalive(true, 10)`。
+  - `client::connect_stream` 建立基于 Tokio 的 SSH 会话，`authenticate_password("root", <random-password>)` 完成密码认证。
+  - 配置 keepalive：`Config.keepalive_interval = Some(Duration::from_secs(10))`。
 - 远端监听（等价于 -R）：
-  - `let (listener, bound_port) = session.channel_forward_listen(remote_port, Some("0.0.0.0"), None)?;`
-  - 可传 `remote_port = 0` 让服务器分配端口（使用 `bound_port`）。参见 ssh2 文档：`https://docs.rs/ssh2/latest/ssh2/struct.Session.html#method.channel_forward_listen`。
+  - `handle.tcpip_forward("0.0.0.0", remote_port)` 请求监听端口，使用返回的 `bound_port` 建立映射。
 - 接入与桥接：
-  - 循环 `listener.accept()` 获得入站 `Channel`；为每个连接建立到宿主 `127.0.0.1:<host_port>` 的 TCP 连接。
-  - 双向拷贝：`Channel.read ↔ HostTcp.write`，`HostTcp.read ↔ Channel.write`。
-  - 并发与阻塞：`ssh2` 为同步 I/O，可用线程池或 `spawn_blocking` 包装数据泵；连接数量通常有限。
+  - `Handler::server_channel_open_forwarded_tcpip` 收到入站连接后，`tokio::spawn` 启动任务。
+  - 任务内 `channel.into_stream()` 与宿主 `TcpStream` 使用 `tokio::io::copy_bidirectional` 双向转发数据。
 - 生命周期与清理：
   - 记录侧车容器 ID 与 SSH 会话句柄；容器结束即关闭会话、销毁侧车与临时网络。
-  - 异常断开时，监听循环退出并上抛错误，便于测试察觉。
+  - Drop 时标记停止标志、取消转发任务，并发送 `disconnect` 请求完成清理。
 
 ---
 

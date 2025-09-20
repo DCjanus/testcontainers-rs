@@ -29,7 +29,7 @@ log = "0.4"
 memchr = "2.7.2"
 parse-display = "0.9.0"
 pin-project-lite = "0.2.14"
-ssh2 = { version = "0.9", optional = true }
+russh = { version = "0.54.3", default-features = false, features = ["ring", "rsa"], optional = true }
 reqwest = { version = "0.12.5", features = [
     "rustls-tls",
     "rustls-tls-native-roots",
@@ -62,8 +62,8 @@ http_wait = ["reqwest"]
 properties-config = ["serde-java-properties"]
 reusable-containers = []
 device-requests = []
-host-expose = ["ssh2"]
-host-expose-vendored-openssl = ["host-expose", "ssh2/vendored-openssl"]
+host-expose = ["russh"]
+host-expose-vendored-openssl = ["host-expose"]
 
 [dev-dependencies]
 anyhow = "1.0.86"
