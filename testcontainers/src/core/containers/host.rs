@@ -74,6 +74,12 @@ impl HostPortExposure {
             ));
         }
 
+        if requested_ports.iter().any(|port| *port == SSH_PORT) {
+            return Err(TestcontainersError::other(
+                "host port exposure does not support exposing port 22",
+            ));
+        }
+
         if let Some(network) = container_req.network() {
             if network.starts_with("container:") {
                 return Err(TestcontainersError::other(
