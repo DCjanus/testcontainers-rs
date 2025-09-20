@@ -8,11 +8,10 @@ use bollard::{
     query_parameters::{CreateContainerOptions, CreateContainerOptionsBuilder},
 };
 
-use crate::core::containers::host::HostPortExposure;
-
 use crate::{
     core::{
         client::{Client, ClientError},
+        containers::host::HostPortExposure,
         copy::CopyToContainer,
         error::{Result, WaitContainerError},
         mounts::{AccessMode, Mount, MountType},

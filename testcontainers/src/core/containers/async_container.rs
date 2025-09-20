@@ -4,7 +4,6 @@ use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio_stream::StreamExt;
 
 use super::host::HostPortExposure;
-
 use crate::{
     core::{
         async_drop,
