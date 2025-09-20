@@ -10,15 +10,15 @@ use std::{
 };
 
 use russh::{client, Channel, Disconnect};
-use tokio::io::copy_bidirectional;
 use tokio::{
-    io::{self, AsyncWriteExt},
+    io::{self, copy_bidirectional, AsyncWriteExt},
     net::TcpStream,
     task::JoinHandle,
     time::sleep,
 };
 use ulid::Ulid;
 
+use super::async_container::ContainerAsync;
 use crate::{
     core::{
         async_drop,
@@ -32,8 +32,6 @@ use crate::{
     runners::AsyncRunner,
     Image,
 };
-
-use super::async_container::ContainerAsync;
 
 pub(crate) const HOST_INTERNAL_ALIAS: &str = "host.testcontainers.internal";
 const SSHD_IMAGE: &str = "testcontainers/sshd";
