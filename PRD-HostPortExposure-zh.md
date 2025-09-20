@@ -10,7 +10,7 @@
 
 ### 当前进展（2025-02-14）
 
-- `host-expose` / `host-expose-vendored-openssl` 特性已接入，`russh` 作为可选依赖。
+- 功能已默认启用，`russh` 作为常规依赖，无需额外 feature。
 - `ContainerRequest` / `ImageExt` 已新增 `with_exposed_host_port(s)` API。
 - `AsyncRunner` 流程可自动：
   - 启动 `testcontainers/sshd:1.3.0` 侧车并与目标容器共享网络。
@@ -39,25 +39,23 @@
   - `with_exposed_host_port(port: u16)`
   - `with_exposed_host_ports(ports: impl IntoIterator<Item = u16>)`
 
-### 特性开关与依赖策略（避免与 rustls 冲突）
+### 依赖策略（避免与 rustls 冲突）
 
-- 默认不启用 host 暴露功能，避免引入 OpenSSL。
-- Features（示例）：
-  - `host-expose`：启用“宿主端口访问”并打开可选依赖 `russh`。
-  - `host-expose-vendored-openssl`：兼容旧配置，等价于 `host-expose`。
+- 功能默认编译并依赖纯 Rust 的 `russh`，不再需要 OpenSSL。
+- 为兼容既有项目，保留空特性 `host-expose` / `host-expose-vendored-openssl`，启用与否均不影响编译结果。
 - Cargo.toml（示意）：
 
 ```toml
 [features]
 default = []
-host-expose = ["russh"]
+host-expose = []
 host-expose-vendored-openssl = ["host-expose"]
 
 [dependencies]
-russh = { version = "0.54", default-features = false, features = ["ring", "rsa"], optional = true }
+russh = { version = "0.54", default-features = false, features = ["ring", "rsa"] }
 ```
 
-- 说明：`russh` 为纯 Rust 实现，不再需要 OpenSSL。仅当 `host-expose` 启用时编译相关代码。
+- 说明：兼容特性仅用于保持 Cargo 配置不报错，功能总是可用。
 
 ---
 
@@ -149,5 +147,5 @@ russh = { version = "0.54", default-features = false, features = ["ring", "rsa"]
 
 ## 验收标准（DoD）
 
-- 启用 `host-expose` 后示例用例通过；文档包含排错与常见问题。
+- 默认配置下示例用例通过；文档包含排错与常见问题。
 - API 与项目风格一致；lint/CI 通过。

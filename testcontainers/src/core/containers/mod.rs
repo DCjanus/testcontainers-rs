@@ -1,5 +1,4 @@
 pub(crate) mod async_container;
-#[cfg(feature = "host-expose")]
 pub(crate) mod host;
 pub(crate) mod request;
 #[cfg(feature = "blocking")]
