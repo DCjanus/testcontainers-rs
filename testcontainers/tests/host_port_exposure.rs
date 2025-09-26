@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::Result;
 use testcontainers::{
-    core::{ExecCommand, Host, WaitFor},
+    core::{ExecCommand, Host},
     runners::AsyncRunner,
-    GenericImage, ImageExt, TestcontainersError,
+    ContainerAsync, GenericImage, ImageExt, TestcontainersError,
 };
 use ulid::Ulid;
 
@@ -22,11 +22,6 @@ fn host_url(port: u16) -> String {
 
 fn base_alpine_image() -> GenericImage {
     GenericImage::new(ALPINE_IMAGE, ALPINE_TAG)
-}
-
-fn wget_host(port: u16) -> ExecCommand {
-    let url = host_url(port);
-    ExecCommand::new(vec!["wget".into(), "-qO-".into(), url])
 }
 
 fn wget_host_with_timeout(port: u16) -> ExecCommand {
@@ -55,19 +50,66 @@ fn respond_once(mut stream: TcpStream, body: &'static str) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// Verifies a single container can reach a host service exposed through one requested port.
-#[tokio::test]
-async fn exposes_single_host_port() -> Result<()> {
-    let _ = pretty_env_logger::try_init();
-
+/// Starts a test HTTP server that responds with the given body and returns the port number.
+fn start_test_http_server(response_body: &'static str) -> Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
 
     thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
-            respond_once(stream, "hello-from-host");
+            respond_once(stream, response_body);
         }
     });
+
+    Ok(port)
+}
+
+/// Creates a test container with the specified name, network, and exposed host port.
+async fn create_test_container(
+    name: &str,
+    network: &str,
+    exposed_port: u16,
+) -> Result<ContainerAsync<GenericImage>> {
+    let image = base_alpine_image()
+        .with_entrypoint("/bin/sh")
+        .with_cmd(["-c", "sleep 60"])
+        .with_container_name(name)
+        .with_network(network)
+        .with_exposed_host_port(exposed_port);
+
+    image.start().await.map_err(|e| e.into())
+}
+
+/// Asserts that a container can access the given host port and receives the expected response.
+async fn assert_can_access(
+    container: &ContainerAsync<GenericImage>,
+    port: u16,
+    expected_response: &str,
+) -> Result<()> {
+    let mut exec = container.exec(wget_host_with_timeout(port)).await?;
+    let body = String::from_utf8(exec.stdout_to_vec().await?)?;
+    assert_eq!(body, expected_response);
+    assert_eq!(exec.exit_code().await?, Some(0));
+    Ok(())
+}
+
+/// Asserts that a container cannot access the given host port.
+async fn assert_cannot_access(container: &ContainerAsync<GenericImage>, port: u16) -> Result<()> {
+    let exit = container
+        .exec(wget_host_with_timeout(port))
+        .await?
+        .exit_code()
+        .await?;
+    assert_ne!(exit, Some(0));
+    Ok(())
+}
+
+/// Verifies a single container can reach a host service exposed through one requested port.
+#[tokio::test]
+async fn exposes_single_host_port() -> Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    let port = start_test_http_server("hello-from-host")?;
 
     let image = base_alpine_image()
         .with_entrypoint("/bin/sh")
@@ -76,10 +118,7 @@ async fn exposes_single_host_port() -> Result<()> {
 
     let container = image.start().await?;
 
-    let mut exec_result = container.exec(wget_host(port)).await?;
-
-    let body = exec_result.stdout_to_vec().await?;
-    assert_eq!(body, b"hello-from-host");
+    assert_can_access(&container, port, "hello-from-host").await?;
 
     Ok(())
 }
@@ -89,23 +128,8 @@ async fn exposes_single_host_port() -> Result<()> {
 async fn exposes_multiple_host_ports() -> Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    let listener_a = TcpListener::bind(("127.0.0.1", 0))?;
-    let port_a = listener_a.local_addr()?.port();
-
-    let listener_b = TcpListener::bind(("127.0.0.1", 0))?;
-    let port_b = listener_b.local_addr()?.port();
-
-    thread::spawn(move || {
-        if let Ok((stream, _)) = listener_a.accept() {
-            respond_once(stream, "alpha");
-        }
-    });
-
-    thread::spawn(move || {
-        if let Ok((stream, _)) = listener_b.accept() {
-            respond_once(stream, "bravo");
-        }
-    });
+    let port_a = start_test_http_server("alpha")?;
+    let port_b = start_test_http_server("bravo")?;
 
     let image = base_alpine_image()
         .with_entrypoint("/bin/sh")
@@ -114,15 +138,8 @@ async fn exposes_multiple_host_ports() -> Result<()> {
 
     let container = image.start().await?;
 
-    let mut exec_a = container.exec(wget_host(port_a)).await?;
-
-    let mut exec_b = container.exec(wget_host(port_b)).await?;
-
-    let body_a = exec_a.stdout_to_vec().await?;
-    let body_b = exec_b.stdout_to_vec().await?;
-
-    assert_eq!(body_a, b"alpha");
-    assert_eq!(body_b, b"bravo");
+    assert_can_access(&container, port_a, "alpha").await?;
+    assert_can_access(&container, port_b, "bravo").await?;
 
     Ok(())
 }
@@ -165,91 +182,45 @@ async fn fails_when_exposing_reserved_port() {
     }
 }
 
-/// Checks two containers on the same user network receive only their own host port tunnels while remaining mutually reachable.
+/// Validates that host port exposure is scoped per container and doesn't leak between containers.
 #[tokio::test]
 async fn host_port_exposure_is_scoped_per_container() -> Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    let first_host_listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let first_host_port = first_host_listener.local_addr()?.port();
+    // Create two distinct host services on different ports
+    let first_host_port = start_test_http_server("first-host-service")?;
+    let second_host_port = start_test_http_server("second-host-service")?;
 
-    let second_host_listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let second_host_port = second_host_listener.local_addr()?.port();
-
-    thread::spawn(move || {
-        if let Ok((stream, _)) = first_host_listener.accept() {
-            respond_once(stream, "first-host-service");
-        }
-    });
-
-    thread::spawn(move || {
-        if let Ok((stream, _)) = second_host_listener.accept() {
-            respond_once(stream, "second-host-service");
-        }
-    });
-
+    // Generate unique identifiers for network and containers to avoid conflicts
     let suffix = Ulid::new().to_string().to_lowercase();
     let network_name = format!("tc-host-port-net-{suffix}");
     let first_container_name = format!("host-port-first-{suffix}");
     let second_container_name = format!("host-port-second-{suffix}");
 
-    let base_image = base_alpine_image().with_wait_for(WaitFor::seconds(1));
+    // Create two containers, each with only one host port exposed
+    let first_container =
+        create_test_container(&first_container_name, &network_name, first_host_port).await?;
+    let second_container =
+        create_test_container(&second_container_name, &network_name, second_host_port).await?;
 
-    let first_container = base_image
-        .clone()
-        .with_entrypoint("/bin/sh")
-        .with_cmd(["-c", "sleep 60"])
-        .with_container_name(first_container_name.clone())
-        .with_network(network_name.clone())
-        .with_exposed_host_port(first_host_port)
-        .start()
+    // Test port isolation: each container should only access its own exposed port
+    assert_can_access(&first_container, first_host_port, "first-host-service").await?;
+    assert_cannot_access(&first_container, second_host_port).await?;
+    assert_can_access(&second_container, second_host_port, "second-host-service").await?;
+    assert_cannot_access(&second_container, first_host_port).await?;
+
+    // Verify containers can still communicate with each other normally
+    let mut first_to_second = first_container
+        .exec(ping_once(&second_container_name))
         .await?;
+    let _ = first_to_second.stdout_to_vec().await?;
+    assert_eq!(first_to_second.exit_code().await?, Some(0));
 
-    let second_container = base_image
-        .with_entrypoint("/bin/sh")
-        .with_cmd(["-c", "sleep 60"])
-        .with_container_name(second_container_name.clone())
-        .with_network(network_name)
-        .with_exposed_host_port(second_host_port)
-        .start()
+    let mut second_to_first = second_container
+        .exec(ping_once(&first_container_name))
         .await?;
-
-    let mut first_container_to_first_host =
-        first_container.exec(wget_host_with_timeout(first_host_port)).await?;
-    let body = String::from_utf8(first_container_to_first_host.stdout_to_vec().await?)?;
-    assert_eq!(body, "first-host-service");
-
-    let exit = first_container
-        .exec(wget_host_with_timeout(second_host_port))
-        .await?
-        .exit_code()
-        .await?;
-    assert_ne!(exit, Some(0));
-
-    let mut second_container_to_second_host =
-        second_container.exec(wget_host_with_timeout(second_host_port)).await?;
-    let body =
-        String::from_utf8(second_container_to_second_host.stdout_to_vec().await?)?;
-    assert_eq!(body, "second-host-service");
-
-    let exit = second_container
-        .exec(wget_host_with_timeout(first_host_port))
-        .await?
-        .exit_code()
-        .await?;
-    assert_ne!(exit, Some(0));
-
-    let mut first_container_reachability =
-        first_container.exec(ping_once(&second_container_name)).await?;
-    let _ = first_container_reachability.stdout_to_vec().await?;
-    let exit = first_container_reachability.exit_code().await?;
-    assert_eq!(exit, Some(0));
-
-    let mut second_container_reachability =
-        second_container.exec(ping_once(&first_container_name)).await?;
-    let _ = second_container_reachability.stdout_to_vec().await?;
-    let exit = second_container_reachability.exit_code().await?;
-    assert_eq!(exit, Some(0));
+    let _ = second_to_first.stdout_to_vec().await?;
+    assert_eq!(second_to_first.exit_code().await?, Some(0));
 
     Ok(())
 }
