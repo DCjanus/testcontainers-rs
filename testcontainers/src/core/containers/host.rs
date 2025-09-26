@@ -480,15 +480,3 @@ impl From<HostExposeError> for TestcontainersError {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn generates_passwords() {
-        let password_a = format!("tc-{}", Ulid::new());
-        let password_b = format!("tc-{}", Ulid::new());
-        assert_ne!(password_a, password_b);
-    }
-}
