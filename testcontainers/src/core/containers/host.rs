@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     convert::TryFrom,
+    future,
     net::IpAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -69,13 +70,13 @@ impl HostPortExposure {
             ));
         }
 
-        if requested_ports.iter().any(|port| *port == 0) {
+        if requested_ports.contains(&0) {
             return Err(TestcontainersError::other(
                 "host port exposure requires ports greater than zero",
             ));
         }
 
-        if requested_ports.iter().any(|port| *port == SSH_PORT) {
+        if requested_ports.contains(&SSH_PORT) {
             return Err(TestcontainersError::other(
                 "host port exposure does not support exposing port 22",
             ));
@@ -122,9 +123,11 @@ impl HostPortExposure {
 
         let tcp_stream = connect_with_retry(&ssh_host, ssh_host_port).await?;
 
-        let mut config = client::Config::default();
-        config.nodelay = true;
-        config.keepalive_interval = Some(Duration::from_secs(10));
+        let config = client::Config {
+            nodelay: true,
+            keepalive_interval: Some(Duration::from_secs(10)),
+            ..Default::default()
+        };
         let state = Arc::new(ForwardState::new());
         let handler = HostExposeClient::new(Arc::clone(&state));
         let config = Arc::new(config);
@@ -279,9 +282,7 @@ async fn forward_connection(
 
     let mut channel_stream = channel.into_stream();
 
-    if let Err(err) = copy_bidirectional(&mut channel_stream, &mut stream).await {
-        return Err(err);
-    }
+    copy_bidirectional(&mut channel_stream, &mut stream).await?;
 
     if let Err(err) = stream.shutdown().await {
         log::trace!(
@@ -375,7 +376,7 @@ impl client::Handler for HostExposeClient {
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        async { Ok(true) }
+        future::ready(Ok(true))
     }
 
     fn server_channel_open_forwarded_tcpip(

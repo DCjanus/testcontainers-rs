@@ -127,9 +127,7 @@ impl<I: Image> ContainerRequest<I> {
     }
 
     pub fn host_port_exposures(&self) -> Option<&[u16]> {
-        self.host_port_exposures
-            .as_ref()
-            .map(|ports| ports.as_slice())
+        self.host_port_exposures.as_deref()
     }
 
     pub fn privileged(&self) -> bool {
