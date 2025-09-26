@@ -87,6 +87,12 @@ impl HostPortExposure {
         }
 
         if let Some(network) = container_req.network() {
+            if network == "host" {
+                return Err(TestcontainersError::other(
+                    "host port exposure is not supported with host network mode",
+                ));
+            }
+
             if network.starts_with("container:") {
                 return Err(TestcontainersError::other(
                     "host port exposure is not supported with container network mode",
