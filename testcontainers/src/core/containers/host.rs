@@ -65,40 +65,11 @@ impl HostPortExposure {
             _ => return Ok(None),
         };
 
-        requested_ports.sort_unstable();
-        requested_ports.dedup();
+        normalize_requested_ports(&mut requested_ports)?;
+        ensure_host_alias_available(&container_req.hosts)?;
 
-        if container_req.hosts.contains_key(HOST_INTERNAL_ALIAS) {
-            return Err(TestcontainersError::other(
-                "host port exposure is not supported when 'host.testcontainers.internal' is already defined",
-            ));
-        }
-
-        if requested_ports.contains(&0) {
-            return Err(TestcontainersError::other(
-                "host port exposure requires ports greater than zero (port 0 is invalid)",
-            ));
-        }
-
-        if requested_ports.contains(&SSH_PORT) {
-            return Err(TestcontainersError::other(
-                "host port exposure does not support exposing port 22 (SSH port is reserved)",
-            ));
-        }
-
-        if let Some(network) = container_req.network() {
-            if network == "host" {
-                return Err(TestcontainersError::other(
-                    "host port exposure is not supported with host network mode",
-                ));
-            }
-
-            if network.starts_with("container:") {
-                return Err(TestcontainersError::other(
-                    "host port exposure is not supported with container network mode",
-                ));
-            }
-        }
+        let network = container_req.network().map(|network| network.as_str());
+        validate_network_mode(network)?;
 
         #[cfg(feature = "reusable-containers")]
         {
@@ -112,80 +83,33 @@ impl HostPortExposure {
 
         let password = format!("tc-{}", Ulid::new());
 
-        let mut sshd = GenericImage::new(SSHD_IMAGE, SSHD_TAG)
-            .with_exposed_port((SSH_PORT).tcp())
-            .with_wait_for(WaitFor::seconds(1))
-            .with_env_var("PASSWORD", password.clone());
+        let ssh_sidecar = spawn_sshd_sidecar(container_req.network().cloned(), &password).await?;
 
-        if let Some(network) = container_req.network() {
-            sshd = sshd.with_network(network.clone());
-        }
-
-        let sidecar = sshd.start().await?;
-
-        let ssh_host = sidecar.get_host().await?;
-        let ssh_host_port = sidecar.get_host_port_ipv4((SSH_PORT).tcp()).await?;
-        let sidecar_ip = resolve_sidecar_ip(&sidecar).await?;
+        let SshSidecar {
+            container: sidecar,
+            host: ssh_host,
+            host_port: ssh_host_port,
+            bridge_ip: sidecar_ip,
+        } = ssh_sidecar;
 
         container_req
             .hosts
             .insert(HOST_INTERNAL_ALIAS.to_string(), Host::Addr(sidecar_ip));
 
-        let tcp_stream = connect_with_retry(&ssh_host, ssh_host_port).await?;
+        let mut ssh_connection =
+            establish_ssh_connection(&ssh_host, ssh_host_port, &password).await?;
 
-        let config = client::Config {
-            nodelay: true,
-            keepalive_interval: Some(Duration::from_secs(10)),
-            ..Default::default()
-        };
-        let state = Arc::new(ForwardState::new());
-        let handler = HostExposeClient::new(Arc::clone(&state));
-        let config = Arc::new(config);
+        register_requested_ports(
+            &requested_ports,
+            &mut ssh_connection.handle,
+            &ssh_connection.state,
+        )
+        .await?;
 
-        let mut ssh_handle = client::connect_stream(config, tcp_stream, handler)
-            .await
-            .map_err(TestcontainersError::from)?;
-
-        let auth_result = ssh_handle
-            .authenticate_password(SSH_USERNAME, password)
-            .await
-            .map_err(|err| {
-                map_ssh_error("SSH authentication failed for host port exposure", err)
-            })?;
-
-        if !auth_result.success() {
-            return Err(TestcontainersError::other(
-                "SSH authentication failed for host port exposure - check SSHD container logs and credentials",
-            ));
-        }
-
-        for port in requested_ports {
-            state.register_port(port, port);
-
-            let bound_port = ssh_handle
-                .tcpip_forward("0.0.0.0", u32::from(port))
-                .await
-                .map_err(|err| {
-                    map_ssh_error(
-                        &format!("failed to request remote port forwarding for {port}"),
-                        err,
-                    )
-                })?;
-
-            let bound_port = u16::try_from(bound_port).map_err(|_| {
-                TestcontainersError::other(format!(
-                    "remote sshd assigned invalid port for host exposure: requested {port}, bound {bound_port} - port range mismatch"
-                ))
-            })?;
-
-            state.register_port(bound_port, port);
-
-            if bound_port != port {
-                log::warn!(
-                    "remote sshd assigned different port for host exposure: requested {port}, bound {bound_port}"
-                );
-            }
-        }
+        let SshConnection {
+            handle: ssh_handle,
+            state,
+        } = ssh_connection;
 
         Ok(Some(Self {
             _sidecar: Box::new(sidecar),
@@ -218,6 +142,161 @@ impl HostPortExposure {
             task.abort();
         }
     }
+}
+
+struct SshSidecar {
+    container: ContainerAsync<GenericImage>,
+    host: UrlHost,
+    host_port: u16,
+    bridge_ip: IpAddr,
+}
+
+struct SshConnection {
+    handle: client::Handle<HostExposeClient>,
+    state: Arc<ForwardState>,
+}
+
+fn normalize_requested_ports(ports: &mut Vec<u16>) -> Result<(), TestcontainersError> {
+    ports.sort_unstable();
+    ports.dedup();
+
+    if ports.contains(&0) {
+        return Err(TestcontainersError::other(
+            "host port exposure requires ports greater than zero (port 0 is invalid)",
+        ));
+    }
+
+    if ports.contains(&SSH_PORT) {
+        return Err(TestcontainersError::other(
+            "host port exposure does not support exposing port 22 (SSH port is reserved)",
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_host_alias_available(hosts: &HashMap<String, Host>) -> Result<(), TestcontainersError> {
+    if hosts.contains_key(HOST_INTERNAL_ALIAS) {
+        return Err(TestcontainersError::other(
+            "host port exposure is not supported when 'host.testcontainers.internal' is already defined",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_network_mode(network: Option<&str>) -> Result<(), TestcontainersError> {
+    if let Some(network) = network {
+        if network == "host" {
+            return Err(TestcontainersError::other(
+                "host port exposure is not supported with host network mode",
+            ));
+        }
+
+        if network.starts_with("container:") {
+            return Err(TestcontainersError::other(
+                "host port exposure is not supported with container network mode",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn spawn_sshd_sidecar(
+    network: Option<String>,
+    password: &str,
+) -> Result<SshSidecar, TestcontainersError> {
+    let mut sshd = GenericImage::new(SSHD_IMAGE, SSHD_TAG)
+        .with_exposed_port((SSH_PORT).tcp())
+        .with_wait_for(WaitFor::seconds(1))
+        .with_env_var("PASSWORD", password.to_owned());
+
+    if let Some(network) = network {
+        sshd = sshd.with_network(network);
+    }
+
+    let container = sshd.start().await?;
+    let host = container.get_host().await?;
+    let host_port = container.get_host_port_ipv4((SSH_PORT).tcp()).await?;
+    let bridge_ip = resolve_sidecar_ip(&container).await?;
+
+    Ok(SshSidecar {
+        container,
+        host,
+        host_port,
+        bridge_ip,
+    })
+}
+
+async fn establish_ssh_connection(
+    ssh_host: &UrlHost,
+    ssh_host_port: u16,
+    password: &str,
+) -> Result<SshConnection, TestcontainersError> {
+    let tcp_stream = connect_with_retry(ssh_host, ssh_host_port).await?;
+
+    let config = client::Config {
+        nodelay: true,
+        keepalive_interval: Some(Duration::from_secs(10)),
+        ..Default::default()
+    };
+    let state = Arc::new(ForwardState::new());
+    let handler = HostExposeClient::new(Arc::clone(&state));
+    let config = Arc::new(config);
+
+    let mut handle = client::connect_stream(config, tcp_stream, handler)
+        .await
+        .map_err(TestcontainersError::from)?;
+
+    let auth_result = handle
+        .authenticate_password(SSH_USERNAME, password)
+        .await
+        .map_err(|err| map_ssh_error("SSH authentication failed for host port exposure", err))?;
+
+    if !auth_result.success() {
+        return Err(TestcontainersError::other(
+            "SSH authentication failed for host port exposure - check SSHD container logs and credentials",
+        ));
+    }
+
+    Ok(SshConnection { handle, state })
+}
+
+async fn register_requested_ports(
+    requested_ports: &[u16],
+    ssh_handle: &mut client::Handle<HostExposeClient>,
+    state: &Arc<ForwardState>,
+) -> Result<(), TestcontainersError> {
+    for port in requested_ports {
+        state.register_port(*port, *port);
+
+        let bound_port = ssh_handle
+            .tcpip_forward("0.0.0.0", u32::from(*port))
+            .await
+            .map_err(|err| {
+                map_ssh_error(
+                    &format!("failed to request remote port forwarding for {port}"),
+                    err,
+                )
+            })?;
+
+        let bound_port = u16::try_from(bound_port).map_err(|_| {
+            TestcontainersError::other(format!(
+                "remote sshd assigned invalid port for host exposure: requested {port}, bound {bound_port} - port range mismatch"
+            ))
+        })?;
+
+        state.register_port(bound_port, *port);
+
+        if bound_port != *port {
+            log::warn!(
+                "remote sshd assigned different port for host exposure: requested {port}, bound {bound_port}"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 impl Drop for HostPortExposure {
