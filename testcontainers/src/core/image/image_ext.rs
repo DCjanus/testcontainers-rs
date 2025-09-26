@@ -520,3 +520,64 @@ impl<RI: Into<ContainerRequest<I>>, I: Image> ImageExt<I> for RI {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::images::generic::GenericImage;
+
+    #[test]
+    fn test_with_exposed_host_port_single() {
+        let image = GenericImage::new("test", "latest");
+        let request = image.with_exposed_host_port(8080);
+
+        assert_eq!(request.host_port_exposures, Some(vec![8080]));
+    }
+
+    #[test]
+    fn test_with_exposed_host_ports_multiple() {
+        let image = GenericImage::new("test", "latest");
+        let request = image.with_exposed_host_ports([8080, 9090, 3000]);
+
+        assert_eq!(request.host_port_exposures, Some(vec![3000, 8080, 9090]));
+    }
+
+    #[test]
+    fn test_with_exposed_host_ports_deduplication() {
+        let image = GenericImage::new("test", "latest");
+        let request = image.with_exposed_host_ports([8080, 9090, 8080, 3000, 9090]);
+
+        assert_eq!(request.host_port_exposures, Some(vec![3000, 8080, 9090]));
+    }
+
+    #[test]
+    fn test_with_exposed_host_ports_empty() {
+        let image = GenericImage::new("test", "latest");
+        let request = image.with_exposed_host_ports([]);
+
+        assert_eq!(request.host_port_exposures, Some(vec![]));
+    }
+
+    #[test]
+    fn test_with_exposed_host_ports_chaining() {
+        let image = GenericImage::new("test", "latest");
+        let request = image
+            .with_exposed_host_port(8080)
+            .with_exposed_host_ports([9090, 3000]);
+
+        assert_eq!(request.host_port_exposures, Some(vec![3000, 8080, 9090]));
+    }
+
+    #[test]
+    fn test_with_exposed_host_ports_preserves_existing() {
+        let image = GenericImage::new("test", "latest");
+        let request = image.with_exposed_host_port(8080);
+
+        // The first call already set host_port_exposures to Some(vec![8080])
+        // Now we add more ports
+        let request = request.with_exposed_host_ports([9090, 3000]);
+
+        // The result should include all ports: 8080 (from first call), 9090, 3000 (from second call)
+        assert_eq!(request.host_port_exposures, Some(vec![3000, 8080, 9090]));
+    }
+}
