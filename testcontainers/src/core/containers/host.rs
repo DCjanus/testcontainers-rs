@@ -41,6 +41,10 @@ const SSHD_TAG: &str = "1.3.0";
 const SSH_USERNAME: &str = "root";
 const SSH_PORT: u16 = 22;
 
+// Configuration constants for SSH connection
+const SSH_CONNECTION_MAX_ATTEMPTS: u32 = 20;
+const SSH_CONNECTION_RETRY_DELAY_MS: u64 = 100;
+
 /// Manages the lifetime of the SSH reverse tunnels used to expose host ports.
 pub(crate) struct HostPortExposure {
     _sidecar: Box<ContainerAsync<GenericImage>>,
@@ -72,13 +76,13 @@ impl HostPortExposure {
 
         if requested_ports.contains(&0) {
             return Err(TestcontainersError::other(
-                "host port exposure requires ports greater than zero",
+                "host port exposure requires ports greater than zero (port 0 is invalid)",
             ));
         }
 
         if requested_ports.contains(&SSH_PORT) {
             return Err(TestcontainersError::other(
-                "host port exposure does not support exposing port 22",
+                "host port exposure does not support exposing port 22 (SSH port is reserved)",
             ));
         }
 
@@ -95,7 +99,7 @@ impl HostPortExposure {
             use crate::ReuseDirective;
             if !matches!(container_req.reuse(), ReuseDirective::Never) {
                 return Err(TestcontainersError::other(
-                    "host port exposure is not supported for reusable containers",
+                    "host port exposure is not supported for reusable containers (due to SSH tunnel conflicts)",
                 ));
             }
         }
@@ -139,11 +143,13 @@ impl HostPortExposure {
         let auth_result = ssh_handle
             .authenticate_password(SSH_USERNAME, password)
             .await
-            .map_err(|err| map_ssh_error("ssh authentication failed", err))?;
+            .map_err(|err| {
+                map_ssh_error("SSH authentication failed for host port exposure", err)
+            })?;
 
         if !auth_result.success() {
             return Err(TestcontainersError::other(
-                "ssh authentication for host port exposure failed",
+                "SSH authentication failed for host port exposure - check SSHD container logs and credentials",
             ));
         }
 
@@ -162,7 +168,7 @@ impl HostPortExposure {
 
             let bound_port = u16::try_from(bound_port).map_err(|_| {
                 TestcontainersError::other(format!(
-                    "remote sshd assigned invalid port for host exposure: requested {port}, bound {bound_port}"
+                    "remote sshd assigned invalid port for host exposure: requested {port}, bound {bound_port} - port range mismatch"
                 ))
             })?;
 
@@ -223,7 +229,6 @@ async fn resolve_sidecar_ip(
 async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, TestcontainersError> {
     let host_str = host.to_string();
     let mut attempts = 0;
-    let max_attempts = 20;
 
     loop {
         match TcpStream::connect((host_str.as_str(), port)).await {
@@ -235,9 +240,9 @@ async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, Test
                 }
                 return Ok(stream);
             }
-            Err(err) if attempts < max_attempts => {
+            Err(err) if attempts < SSH_CONNECTION_MAX_ATTEMPTS => {
                 attempts += 1;
-                sleep(Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(SSH_CONNECTION_RETRY_DELAY_MS)).await;
                 log::trace!(
                     "waiting for sshd sidecar to be reachable at {host}:{port}: {err}",
                     host = host_str.as_str()
