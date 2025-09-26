@@ -17,6 +17,7 @@ use tokio::{
     time::sleep,
 };
 use ulid::Ulid;
+use url::Host as UrlHost;
 
 use super::async_container::ContainerAsync;
 use crate::{
@@ -111,6 +112,7 @@ impl HostPortExposure {
 
         let sidecar = sshd.start().await?;
 
+        let ssh_host = sidecar.get_host().await?;
         let ssh_host_port = sidecar.get_host_port_ipv4((SSH_PORT).tcp()).await?;
         let sidecar_ip = resolve_sidecar_ip(&sidecar).await?;
 
@@ -118,7 +120,7 @@ impl HostPortExposure {
             .hosts
             .insert(HOST_INTERNAL_ALIAS.to_string(), Host::Addr(sidecar_ip));
 
-        let tcp_stream = connect_with_retry(ssh_host_port).await?;
+        let tcp_stream = connect_with_retry(&ssh_host, ssh_host_port).await?;
 
         let mut config = client::Config::default();
         config.nodelay = true;
@@ -215,13 +217,13 @@ async fn resolve_sidecar_ip(
     sidecar.get_bridge_ip_address().await
 }
 
-async fn connect_with_retry(port: u16) -> Result<TcpStream, TestcontainersError> {
-    let addr = ("127.0.0.1", port);
+async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, TestcontainersError> {
+    let host_str = host.to_string();
     let mut attempts = 0;
     let max_attempts = 20;
 
     loop {
-        match TcpStream::connect(addr).await {
+        match TcpStream::connect((host_str.as_str(), port)).await {
             Ok(stream) => {
                 if let Err(err) = stream.set_nodelay(true) {
                     return Err(TestcontainersError::other(format!(
@@ -233,11 +235,15 @@ async fn connect_with_retry(port: u16) -> Result<TcpStream, TestcontainersError>
             Err(err) if attempts < max_attempts => {
                 attempts += 1;
                 sleep(Duration::from_millis(100)).await;
-                log::trace!("waiting for sshd sidecar to be reachable on port {port}: {err}");
+                log::trace!(
+                    "waiting for sshd sidecar to be reachable at {host}:{port}: {err}",
+                    host = host_str.as_str()
+                );
             }
             Err(err) => {
                 return Err(TestcontainersError::other(format!(
-                    "failed to connect to sshd sidecar on port {port}: {err}"
+                    "failed to connect to sshd sidecar at {host}:{port}: {err}",
+                    host = host_str.as_str()
                 )))
             }
         }
