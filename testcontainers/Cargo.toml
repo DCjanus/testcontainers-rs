@@ -61,8 +61,6 @@ http_wait = ["reqwest"]
 properties-config = ["serde-java-properties"]
 reusable-containers = []
 device-requests = []
-host-expose = []
-host-expose-vendored-openssl = ["host-expose"]
 
 [dev-dependencies]
 anyhow = "1.0.86"

@@ -42,20 +42,15 @@
 ### 依赖策略（避免与 rustls 冲突）
 
 - 功能默认编译并依赖纯 Rust 的 `russh`，不再需要 OpenSSL。
-- 为兼容既有项目，保留空特性 `host-expose` / `host-expose-vendored-openssl`，启用与否均不影响编译结果。
+- 使用 `russh` 的 `ring` 特性实现密码学功能，避免了 OpenSSL 依赖。
 - Cargo.toml（示意）：
 
 ```toml
-[features]
-default = []
-host-expose = []
-host-expose-vendored-openssl = ["host-expose"]
-
 [dependencies]
-russh = { version = "0.54", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.54.3", default-features = false, features = ["ring", "rsa"] }
 ```
 
-- 说明：兼容特性仅用于保持 Cargo 配置不报错，功能总是可用。
+- 说明：主机端口暴露功能始终可用，无需特性开关。
 
 ---
 
