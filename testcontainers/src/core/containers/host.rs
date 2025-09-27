@@ -207,6 +207,9 @@ fn prepare_host_exposure<I: Image>(
 async fn spawn_sshd_sidecar(
     plan: &HostExposurePlan,
 ) -> Result<ContainerAsync<GenericImage>, TestcontainersError> {
+    // Future improvement: swap the SSHD sidecar with a purpose-built container or
+    // lightweight SOCKS5 proxy to unlock features like UDP forwarding while keeping
+    // host port exposure flexible.
     let mut sshd = GenericImage::new(plan.ssh_image, plan.ssh_tag)
         .with_exposed_port(plan.ssh_port.tcp())
         .with_wait_for(WaitFor::seconds(1))
