@@ -261,12 +261,9 @@ async fn register_requested_ports(
                 ))
             })?;
 
-        let bound_port = u16::try_from(bound_port)
-            .expect("remote sshd assigned port outside the valid host exposure range");
-
-        if bound_port != *port {
+        if bound_port != 0 {
             return Err(other_error(format!(
-                "host port exposure required bound port {port}, but sshd assigned {bound_port}"
+                "sshd sidecar assigned port {bound_port} instead of requested port {port}",
             )));
         }
     }
