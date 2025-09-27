@@ -212,7 +212,7 @@ async fn spawn_sshd_sidecar(
     password: &str,
 ) -> Result<SshSidecar, TestcontainersError> {
     let mut sshd = GenericImage::new(SSHD_IMAGE, SSHD_TAG)
-        .with_exposed_port((SSH_PORT).tcp())
+        .with_exposed_port(SSH_PORT.tcp())
         .with_wait_for(WaitFor::seconds(1))
         .with_env_var("PASSWORD", password.to_owned());
 
@@ -222,8 +222,8 @@ async fn spawn_sshd_sidecar(
 
     let container = sshd.start().await?;
     let host = container.get_host().await?;
-    let host_port = container.get_host_port_ipv4((SSH_PORT).tcp()).await?;
-    let bridge_ip = resolve_sidecar_ip(&container).await?;
+    let host_port = container.get_host_port_ipv4(SSH_PORT.tcp()).await?;
+    let bridge_ip = container.get_bridge_ip_address().await?;
 
     Ok(SshSidecar {
         container,
@@ -307,12 +307,6 @@ impl Drop for HostPortExposure {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-async fn resolve_sidecar_ip(
-    sidecar: &ContainerAsync<GenericImage>,
-) -> Result<IpAddr, TestcontainersError> {
-    sidecar.get_bridge_ip_address().await
 }
 
 async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, TestcontainersError> {
@@ -474,7 +468,7 @@ impl client::Handler for HostExposeClient {
     fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+    ) -> impl future::Future<Output = Result<bool, Self::Error>> + Send {
         future::ready(Ok(true))
     }
 
@@ -486,7 +480,7 @@ impl client::Handler for HostExposeClient {
         originator_address: &str,
         originator_port: u32,
         _session: &mut client::Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+    ) -> impl future::Future<Output = Result<(), Self::Error>> + Send {
         let state = Arc::clone(&self.state);
         let connected_address = connected_address.to_string();
         let originator_address = originator_address.to_string();
