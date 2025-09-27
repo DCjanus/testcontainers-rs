@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     convert::TryFrom,
     future,
     net::IpAddr,
@@ -44,6 +44,7 @@ const SSH_PORT: u16 = 22;
 // Configuration constants for SSH connection
 const SSH_CONNECTION_MAX_ATTEMPTS: u32 = 20;
 const SSH_CONNECTION_RETRY_DELAY_MS: u64 = 100;
+const SSH_CONNECTION_RETRY_MAX_DELAY_MS: u64 = 2_000;
 
 /// Manages the lifetime of the SSH reverse tunnels used to expose host ports.
 pub(crate) struct HostPortExposure {
@@ -68,7 +69,10 @@ impl HostPortExposure {
         normalize_requested_ports(&mut requested_ports)?;
         ensure_host_alias_available(&container_req.hosts)?;
 
-        let network = container_req.network().map(|network| network.as_str());
+        let network = container_req
+            .network()
+            .as_ref()
+            .map(|network| network.as_str());
         validate_network_mode(network)?;
 
         #[cfg(feature = "reusable-containers")]
@@ -83,7 +87,7 @@ impl HostPortExposure {
 
         let password = format!("tc-{}", Ulid::new());
 
-        let ssh_sidecar = spawn_sshd_sidecar(container_req.network().cloned(), &password).await?;
+        let ssh_sidecar = spawn_sshd_sidecar(container_req.network().clone(), &password).await?;
 
         let SshSidecar {
             container: sidecar,
@@ -175,7 +179,7 @@ fn normalize_requested_ports(ports: &mut Vec<u16>) -> Result<(), TestcontainersE
     Ok(())
 }
 
-fn ensure_host_alias_available(hosts: &HashMap<String, Host>) -> Result<(), TestcontainersError> {
+fn ensure_host_alias_available(hosts: &BTreeMap<String, Host>) -> Result<(), TestcontainersError> {
     if hosts.contains_key(HOST_INTERNAL_ALIAS) {
         return Err(TestcontainersError::other(
             "host port exposure is not supported when 'host.testcontainers.internal' is already defined",
@@ -314,6 +318,7 @@ async fn resolve_sidecar_ip(
 async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, TestcontainersError> {
     let host_str = host.to_string();
     let mut attempts = 0;
+    let mut delay = Duration::from_millis(SSH_CONNECTION_RETRY_DELAY_MS);
 
     loop {
         match TcpStream::connect((host_str.as_str(), port)).await {
@@ -327,7 +332,11 @@ async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, Test
             }
             Err(err) if attempts < SSH_CONNECTION_MAX_ATTEMPTS => {
                 attempts += 1;
-                sleep(Duration::from_millis(SSH_CONNECTION_RETRY_DELAY_MS)).await;
+                sleep(delay).await;
+                delay = std::cmp::min(
+                    delay * 2,
+                    Duration::from_millis(SSH_CONNECTION_RETRY_MAX_DELAY_MS),
+                );
                 log::trace!(
                     "waiting for sshd sidecar to be reachable at {host}:{port}: {err}",
                     host = host_str.as_str()
@@ -356,7 +365,7 @@ async fn forward_connection(
         return Ok(());
     }
 
-    let mut stream = match TcpStream::connect(("127.0.0.1", host_port)).await {
+    let mut stream = match TcpStream::connect(("localhost", host_port)).await {
         Ok(stream) => stream,
         Err(err) => {
             log::error!(
