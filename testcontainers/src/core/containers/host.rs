@@ -122,20 +122,20 @@ fn prepare_host_exposure<I: Image>(
     requested_ports.dedup();
 
     if requested_ports.contains(&0) {
-        return Err(TestcontainersError::other(
+        return Err(other_error(
             "host port exposure requires ports greater than zero (port 0 is invalid)",
         ));
     }
 
     if requested_ports.contains(&SSH_PORT) {
-        return Err(TestcontainersError::other(format!(
+        return Err(other_error(format!(
             "host port exposure does not support exposing port {} (SSH port is reserved)",
             SSH_PORT
         )));
     }
 
     if container_req.hosts.contains_key(HOST_INTERNAL_ALIAS) {
-        return Err(TestcontainersError::other(
+        return Err(other_error(
             "host port exposure is not supported when 'host.testcontainers.internal' is already defined",
         ));
     }
@@ -143,13 +143,13 @@ fn prepare_host_exposure<I: Image>(
     let network = container_req.network().clone();
     if let Some(network_name) = network.as_deref() {
         if network_name == "host" {
-            return Err(TestcontainersError::other(
+            return Err(other_error(
                 "host port exposure is not supported with host network mode",
             ));
         }
 
         if network_name.starts_with("container:") {
-            return Err(TestcontainersError::other(
+            return Err(other_error(
                 "host port exposure is not supported with container network mode",
             ));
         }
@@ -159,7 +159,7 @@ fn prepare_host_exposure<I: Image>(
     {
         use crate::ReuseDirective;
         if !matches!(container_req.reuse(), ReuseDirective::Never) {
-            return Err(TestcontainersError::other(
+            return Err(other_error(
                 "host port exposure is not supported for reusable containers (due to SSH tunnel conflicts)",
             ));
         }
@@ -228,10 +228,14 @@ async fn establish_ssh_connection(
     let auth_result = handle
         .authenticate_password(plan.ssh_username, &plan.password)
         .await
-        .map_err(|err| map_ssh_error("SSH authentication failed for host port exposure", err))?;
+        .map_err(|err| {
+            other_error(format!(
+                "SSH authentication failed for host port exposure: {err}"
+            ))
+        })?;
 
     if !auth_result.success() {
-        return Err(TestcontainersError::other(
+        return Err(other_error(
             "SSH authentication failed for host port exposure - check SSHD container logs and credentials",
         ));
     }
@@ -251,17 +255,16 @@ async fn register_requested_ports(
             .tcpip_forward("0.0.0.0", u32::from(*port))
             .await
             .map_err(|err| {
-                map_ssh_error(
-                    &format!("failed to request remote port forwarding for {port}"),
-                    err,
-                )
+                other_error(format!(
+                    "failed to request remote port forwarding for {port}: {err}"
+                ))
             })?;
 
         let bound_port = u16::try_from(bound_port)
             .expect("remote sshd assigned port outside the valid host exposure range");
 
         if bound_port != *port {
-            return Err(TestcontainersError::other(format!(
+            return Err(other_error(format!(
                 "host port exposure required bound port {port}, but sshd assigned {bound_port}"
             )));
         }
@@ -289,7 +292,7 @@ async fn connect_with_retry(
         match TcpStream::connect((host_str.as_str(), port)).await {
             Ok(stream) => {
                 if let Err(err) = stream.set_nodelay(true) {
-                    return Err(TestcontainersError::other(format!(
+                    return Err(other_error(format!(
                         "failed to configure ssh tcp stream: {err}"
                     )));
                 }
@@ -305,7 +308,7 @@ async fn connect_with_retry(
                 );
             }
             Err(err) => {
-                return Err(TestcontainersError::other(format!(
+                return Err(other_error(format!(
                     "failed to connect to sshd sidecar at {host}:{port}: {err}",
                     host = host_str.as_str()
                 )))
@@ -314,8 +317,8 @@ async fn connect_with_retry(
     }
 }
 
-fn map_ssh_error(context: &str, err: russh::Error) -> TestcontainersError {
-    TestcontainersError::other(format!("{context}: {err}"))
+fn other_error(message: impl Into<String>) -> TestcontainersError {
+    TestcontainersError::other(message.into())
 }
 
 #[derive(Clone)]
@@ -336,13 +339,13 @@ impl HostExposeHandler {
         originator_port: u32,
     ) -> Result<TcpStream, HostExposeError> {
         let stream = TcpStream::connect(("localhost", remote_port)).await.map_err(|err| {
-            HostExposeError::Exposure(TestcontainersError::other(format!(
+            HostExposeError::Exposure(other_error(format!(
                 "failed to connect to host port {remote_port} for exposure tunnel (via {connected_address} from {originator_address}:{originator_port}): {err}",
             )))
         })?;
 
         stream.set_nodelay(true).map_err(|err| {
-            HostExposeError::Exposure(TestcontainersError::other(format!(
+            HostExposeError::Exposure(other_error(format!(
                 "failed to configure tcp stream for host exposure port {remote_port}: {err}",
             )))
         })?;
@@ -463,7 +466,7 @@ impl From<TestcontainersError> for HostExposeError {
 impl From<HostExposeError> for TestcontainersError {
     fn from(err: HostExposeError) -> Self {
         match err {
-            HostExposeError::Ssh(err) => TestcontainersError::other(format!("ssh error: {err}")),
+            HostExposeError::Ssh(err) => other_error(format!("ssh error: {err}")),
             HostExposeError::Exposure(err) => err,
         }
     }
