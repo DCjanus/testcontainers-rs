@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     convert::TryFrom,
     future,
     sync::{
@@ -66,12 +65,7 @@ impl HostPortExposure {
         let mut ssh_connection = establish_ssh_connection(&sidecar, &plan).await?;
 
         // Stage 4: request remote port forwards for every requested host port.
-        register_requested_ports(
-            &plan.requested_ports,
-            &mut ssh_connection.handle,
-            &ssh_connection.state,
-        )
-        .await?;
+        register_requested_ports(&plan.requested_ports, &mut ssh_connection.handle).await?;
 
         let SshConnection {
             handle: ssh_handle,
@@ -265,11 +259,8 @@ async fn establish_ssh_connection(
 async fn register_requested_ports(
     requested_ports: &[u16],
     ssh_handle: &mut client::Handle<HostExposeClient>,
-    state: &Arc<ForwardState>,
 ) -> Result<(), TestcontainersError> {
     for port in requested_ports {
-        state.register_port(*port, *port);
-
         let bound_port = ssh_handle
             .tcpip_forward("0.0.0.0", u32::from(*port))
             .await
@@ -280,18 +271,13 @@ async fn register_requested_ports(
                 )
             })?;
 
-        let bound_port = u16::try_from(bound_port).map_err(|_| {
-            TestcontainersError::other(format!(
-                "remote sshd assigned invalid port for host exposure: requested {port}, bound {bound_port} - port range mismatch"
-            ))
-        })?;
-
-        state.register_port(bound_port, *port);
+        let bound_port = u16::try_from(bound_port)
+            .expect("remote sshd assigned port outside the valid host exposure range");
 
         if bound_port != *port {
-            log::warn!(
-                "remote sshd assigned different port for host exposure: requested {port}, bound {bound_port}"
-            );
+            return Err(TestcontainersError::other(format!(
+                "host port exposure required bound port {port}, but sshd assigned {bound_port}"
+            )));
         }
     }
 
@@ -351,10 +337,12 @@ async fn forward_connection(
     originator_port: u32,
     stop_flag: Arc<AtomicBool>,
 ) -> io::Result<()> {
+    // Abort quickly when a shutdown is already in progress to avoid spawning new work.
     if stop_flag.load(Ordering::SeqCst) {
         return Ok(());
     }
 
+    // Establish a local TCP connection that mirrors the SSH reverse tunnel.
     let mut stream = match TcpStream::connect(("localhost", host_port)).await {
         Ok(stream) => stream,
         Err(err) => {
@@ -371,6 +359,7 @@ async fn forward_connection(
 
     let mut channel_stream = channel.into_stream();
 
+    // Pump bytes in both directions until either side closes the connection.
     copy_bidirectional(&mut channel_stream, &mut stream).await?;
 
     if let Err(err) = stream.shutdown().await {
@@ -389,7 +378,6 @@ fn map_ssh_error(context: &str, err: russh::Error) -> TestcontainersError {
 #[derive(Debug)]
 struct ForwardState {
     stop_flag: Arc<AtomicBool>,
-    port_mapping: Mutex<HashMap<u16, u16>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -397,7 +385,6 @@ impl ForwardState {
     fn new() -> Self {
         Self {
             stop_flag: Arc::new(AtomicBool::new(false)),
-            port_mapping: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),
         }
     }
@@ -412,21 +399,6 @@ impl ForwardState {
 
     fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop_flag)
-    }
-
-    fn register_port(&self, remote_port: u16, host_port: u16) {
-        self.port_mapping
-            .lock()
-            .expect("forward state port mapping lock poisoned")
-            .insert(remote_port, host_port);
-    }
-
-    fn host_port(&self, remote_port: u16) -> Option<u16> {
-        self.port_mapping
-            .lock()
-            .expect("forward state port mapping lock poisoned")
-            .get(&remote_port)
-            .copied()
     }
 
     fn add_task(&self, handle: JoinHandle<()>) {
@@ -485,22 +457,8 @@ impl client::Handler for HostExposeClient {
                 return Ok(());
             }
 
-            let remote_port = match u16::try_from(connected_port) {
-                Ok(port) => port,
-                Err(_) => {
-                    log::warn!(
-                        "host port exposure received forwarded connection with invalid remote port: {connected_port}"
-                    );
-                    return Ok(());
-                }
-            };
-
-            let Some(host_port) = state.host_port(remote_port) else {
-                log::warn!(
-                    "host port exposure received forwarded connection for unregistered port: {remote_port}"
-                );
-                return Ok(());
-            };
+            let remote_port = u16::try_from(connected_port)
+                .expect("forwarded connection reported port outside u16 range");
 
             let stop_flag = state.stop_flag();
             let handle = tokio::spawn(async move {
@@ -510,7 +468,7 @@ impl client::Handler for HostExposeClient {
 
                 if let Err(err) = forward_connection(
                     channel,
-                    host_port,
+                    remote_port,
                     remote_port,
                     connected_address,
                     originator_address,
