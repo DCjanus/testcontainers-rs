@@ -1,5 +1,6 @@
 use std::{convert::TryFrom, future, sync::Arc, time::Duration};
 
+use log::{debug, trace};
 use russh::{client, Channel, Disconnect};
 use tokio::{
     io::{self, copy_bidirectional, AsyncWriteExt},
@@ -80,7 +81,7 @@ impl HostPortExposure {
                         )
                         .await
                     {
-                        log::debug!("ssh disconnect during host exposure cleanup failed: {err}");
+                        debug!("ssh disconnect during host exposure cleanup failed: {err}");
                     }
                 });
             }
@@ -302,7 +303,7 @@ async fn connect_with_retry(
                 attempts += 1;
                 sleep(delay).await;
                 delay = std::cmp::min(delay * 2, plan.ssh_max_retry_delay);
-                log::trace!(
+                trace!(
                     "waiting for sshd sidecar to be reachable at {host}:{port}: {err}",
                     host = host_str.as_str()
                 );
@@ -375,7 +376,7 @@ impl HostExposeHandler {
         }
 
         if let Err(err) = stream.shutdown().await {
-            log::trace!(
+            trace!(
                 "failed to shutdown tcp stream after host exposure proxy for port {port}: {err}"
             );
         }
@@ -390,9 +391,7 @@ impl HostExposeHandler {
 
         tokio::spawn(async move {
             if let Err(err) = self.forward_connection(channel, stream, port).await {
-                log::debug!(
-                    "host port exposure proxy for remote port {port} ended with error: {err}"
-                );
+                debug!("host port exposure proxy for remote port {port} ended with error: {err}");
             }
         });
     }
