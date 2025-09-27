@@ -31,7 +31,7 @@ const SSH_PORT: u16 = 22;
 /// Manages the lifetime of the SSH reverse tunnels used to expose host ports.
 pub(crate) struct HostPortExposure {
     _sidecar: Box<ContainerAsync<GenericImage>>,
-    ssh_handle: Option<client::Handle<HostExposeClient>>,
+    ssh_handle: Option<client::Handle<HostExposeHandler>>,
     cancel_token: CancellationToken,
 }
 
@@ -89,7 +89,7 @@ impl HostPortExposure {
 }
 
 struct SshConnection {
-    handle: client::Handle<HostExposeClient>,
+    handle: client::Handle<HostExposeHandler>,
     cancel_token: CancellationToken,
 }
 
@@ -218,7 +218,7 @@ async fn establish_ssh_connection(
         ..Default::default()
     };
     let cancel_token = CancellationToken::new();
-    let handler = HostExposeClient::new(cancel_token.clone());
+    let handler = HostExposeHandler::new(cancel_token.clone());
     let config = Arc::new(config);
 
     let mut handle = client::connect_stream(config, tcp_stream, handler)
@@ -244,7 +244,7 @@ async fn establish_ssh_connection(
 
 async fn register_requested_ports(
     requested_ports: &[u16],
-    ssh_handle: &mut client::Handle<HostExposeClient>,
+    ssh_handle: &mut client::Handle<HostExposeHandler>,
 ) -> Result<(), TestcontainersError> {
     for port in requested_ports {
         let bound_port = ssh_handle
@@ -319,11 +319,11 @@ fn map_ssh_error(context: &str, err: russh::Error) -> TestcontainersError {
 }
 
 #[derive(Clone)]
-struct HostExposeClient {
+struct HostExposeHandler {
     cancel_token: CancellationToken,
 }
 
-impl HostExposeClient {
+impl HostExposeHandler {
     fn new(cancel_token: CancellationToken) -> Self {
         Self { cancel_token }
     }
@@ -336,18 +336,12 @@ impl HostExposeClient {
         originator_port: u32,
     ) -> Result<TcpStream, HostExposeError> {
         let stream = TcpStream::connect(("localhost", remote_port)).await.map_err(|err| {
-            log::error!(
-                "failed to connect to host port {remote_port} for exposure tunnel (via {connected_address} from {originator_address}:{originator_port}): {err}"
-            );
             HostExposeError::Exposure(TestcontainersError::other(format!(
                 "failed to connect to host port {remote_port} for exposure tunnel (via {connected_address} from {originator_address}:{originator_port}): {err}",
             )))
         })?;
 
         stream.set_nodelay(true).map_err(|err| {
-            log::debug!(
-                "failed to configure tcp stream for host exposure port {remote_port}: {err}"
-            );
             HostExposeError::Exposure(TestcontainersError::other(format!(
                 "failed to configure tcp stream for host exposure port {remote_port}: {err}",
             )))
@@ -385,9 +379,23 @@ impl HostExposeClient {
 
         Ok(())
     }
+
+    fn start_forward_connection(self, channel: Channel<client::Msg>, stream: TcpStream, port: u16) {
+        if self.cancel_token.is_cancelled() {
+            return;
+        }
+
+        tokio::spawn(async move {
+            if let Err(err) = self.forward_connection(channel, stream, port).await {
+                log::debug!(
+                    "host port exposure proxy for remote port {port} ended with error: {err}"
+                );
+            }
+        });
+    }
 }
 
-impl client::Handler for HostExposeClient {
+impl client::Handler for HostExposeHandler {
     type Error = HostExposeError;
 
     fn check_server_key(
@@ -427,16 +435,7 @@ impl client::Handler for HostExposeClient {
                 )
                 .await?;
 
-            tokio::spawn(async move {
-                if let Err(err) = client
-                    .forward_connection(channel, stream, remote_port)
-                    .await
-                {
-                    log::debug!(
-                        "host port exposure proxy for remote port {remote_port} ended with error: {err}"
-                    );
-                }
-            });
+            client.start_forward_connection(channel, stream, remote_port);
 
             Ok(())
         }
