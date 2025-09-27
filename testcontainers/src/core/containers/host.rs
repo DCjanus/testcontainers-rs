@@ -1,8 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     convert::TryFrom,
     future,
-    net::IpAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -36,15 +35,7 @@ use crate::{
 };
 
 pub(crate) const HOST_INTERNAL_ALIAS: &str = "host.testcontainers.internal";
-const SSHD_IMAGE: &str = "testcontainers/sshd";
-const SSHD_TAG: &str = "1.3.0";
-const SSH_USERNAME: &str = "root";
 const SSH_PORT: u16 = 22;
-
-// Configuration constants for SSH connection
-const SSH_CONNECTION_MAX_ATTEMPTS: u32 = 20;
-const SSH_CONNECTION_RETRY_DELAY_MS: u64 = 100;
-const SSH_CONNECTION_RETRY_MAX_DELAY_MS: u64 = 2_000;
 
 /// Manages the lifetime of the SSH reverse tunnels used to expose host ports.
 pub(crate) struct HostPortExposure {
@@ -58,53 +49,25 @@ impl HostPortExposure {
     pub(crate) async fn setup<I: Image>(
         container_req: &mut ContainerRequest<I>,
     ) -> Result<Option<Self>, TestcontainersError> {
-        let mut requested_ports = match container_req
-            .host_port_exposures()
-            .map(|ports| ports.to_vec())
-        {
-            Some(ports) if !ports.is_empty() => ports,
-            _ => return Ok(None),
+        // Stage 1: validate the request and derive the parameters we need later.
+        let Some(plan) = prepare_host_exposure(container_req)? else {
+            return Ok(None);
         };
 
-        normalize_requested_ports(&mut requested_ports)?;
-        ensure_host_alias_available(&container_req.hosts)?;
-
-        let network = container_req
-            .network()
-            .as_ref()
-            .map(|network| network.as_str());
-        validate_network_mode(network)?;
-
-        #[cfg(feature = "reusable-containers")]
-        {
-            use crate::ReuseDirective;
-            if !matches!(container_req.reuse(), ReuseDirective::Never) {
-                return Err(TestcontainersError::other(
-                    "host port exposure is not supported for reusable containers (due to SSH tunnel conflicts)",
-                ));
-            }
-        }
-
-        let password = format!("tc-{}", Ulid::new());
-
-        let ssh_sidecar = spawn_sshd_sidecar(container_req.network().clone(), &password).await?;
-
-        let SshSidecar {
-            container: sidecar,
-            host: ssh_host,
-            host_port: ssh_host_port,
-            bridge_ip: sidecar_ip,
-        } = ssh_sidecar;
+        // Stage 2: start the SSH sidecar that powers the reverse tunnels.
+        let sidecar = spawn_sshd_sidecar(&plan).await?;
+        let bridge_ip = sidecar.get_bridge_ip_address().await?;
 
         container_req
             .hosts
-            .insert(HOST_INTERNAL_ALIAS.to_string(), Host::Addr(sidecar_ip));
+            .insert(HOST_INTERNAL_ALIAS.to_string(), Host::Addr(bridge_ip));
 
-        let mut ssh_connection =
-            establish_ssh_connection(&ssh_host, ssh_host_port, &password).await?;
+        // Stage 3: establish the SSH session and authenticate against the sidecar.
+        let mut ssh_connection = establish_ssh_connection(&sidecar, &plan).await?;
 
+        // Stage 4: request remote port forwards for every requested host port.
         register_requested_ports(
-            &requested_ports,
+            &plan.requested_ports,
             &mut ssh_connection.handle,
             &ssh_connection.state,
         )
@@ -148,104 +111,133 @@ impl HostPortExposure {
     }
 }
 
-struct SshSidecar {
-    container: ContainerAsync<GenericImage>,
-    host: UrlHost,
-    host_port: u16,
-    bridge_ip: IpAddr,
-}
-
 struct SshConnection {
     handle: client::Handle<HostExposeClient>,
     state: Arc<ForwardState>,
 }
 
-fn normalize_requested_ports(ports: &mut Vec<u16>) -> Result<(), TestcontainersError> {
-    ports.sort_unstable();
-    ports.dedup();
+struct HostExposurePlan {
+    requested_ports: Vec<u16>,
+    password: String,
+    network: Option<String>,
+    ssh_username: &'static str,
+    ssh_port: u16,
+    ssh_max_attempts: u32,
+    ssh_retry_delay: Duration,
+    ssh_max_retry_delay: Duration,
+    ssh_image: &'static str,
+    ssh_tag: &'static str,
+}
 
-    if ports.contains(&0) {
+fn prepare_host_exposure<I: Image>(
+    container_req: &mut ContainerRequest<I>,
+) -> Result<Option<HostExposurePlan>, TestcontainersError> {
+    let mut requested_ports = match container_req
+        .host_port_exposures()
+        .map(|ports| ports.to_vec())
+    {
+        Some(ports) if !ports.is_empty() => ports,
+        _ => return Ok(None),
+    };
+
+    // Ensure port list is deduplicated and does not include reserved entries.
+    requested_ports.sort_unstable();
+    requested_ports.dedup();
+
+    if requested_ports.contains(&0) {
         return Err(TestcontainersError::other(
             "host port exposure requires ports greater than zero (port 0 is invalid)",
         ));
     }
 
-    if ports.contains(&SSH_PORT) {
-        return Err(TestcontainersError::other(
-            "host port exposure does not support exposing port 22 (SSH port is reserved)",
-        ));
+    if requested_ports.contains(&SSH_PORT) {
+        return Err(TestcontainersError::other(format!(
+            "host port exposure does not support exposing port {} (SSH port is reserved)",
+            SSH_PORT
+        )));
     }
 
-    Ok(())
-}
-
-fn ensure_host_alias_available(hosts: &BTreeMap<String, Host>) -> Result<(), TestcontainersError> {
-    if hosts.contains_key(HOST_INTERNAL_ALIAS) {
+    if container_req.hosts.contains_key(HOST_INTERNAL_ALIAS) {
         return Err(TestcontainersError::other(
             "host port exposure is not supported when 'host.testcontainers.internal' is already defined",
         ));
     }
 
-    Ok(())
-}
-
-fn validate_network_mode(network: Option<&str>) -> Result<(), TestcontainersError> {
-    if let Some(network) = network {
-        if network == "host" {
+    let network = container_req.network().clone();
+    if let Some(network_name) = network.as_deref() {
+        if network_name == "host" {
             return Err(TestcontainersError::other(
                 "host port exposure is not supported with host network mode",
             ));
         }
 
-        if network.starts_with("container:") {
+        if network_name.starts_with("container:") {
             return Err(TestcontainersError::other(
                 "host port exposure is not supported with container network mode",
             ));
         }
     }
 
-    Ok(())
+    #[cfg(feature = "reusable-containers")]
+    {
+        use crate::ReuseDirective;
+        if !matches!(container_req.reuse(), ReuseDirective::Never) {
+            return Err(TestcontainersError::other(
+                "host port exposure is not supported for reusable containers (due to SSH tunnel conflicts)",
+            ));
+        }
+    }
+
+    let password = format!("tc-{}", Ulid::new());
+
+    Ok(Some(HostExposurePlan {
+        requested_ports,
+        password,
+        network,
+        ssh_username: "root",
+        ssh_port: SSH_PORT,
+        ssh_max_attempts: 20,
+        ssh_retry_delay: Duration::from_millis(100),
+        ssh_max_retry_delay: Duration::from_millis(2000),
+        ssh_image: "testcontainers/sshd",
+        ssh_tag: "1.3.0",
+    }))
 }
 
 async fn spawn_sshd_sidecar(
-    network: Option<String>,
-    password: &str,
-) -> Result<SshSidecar, TestcontainersError> {
-    let mut sshd = GenericImage::new(SSHD_IMAGE, SSHD_TAG)
-        .with_exposed_port(SSH_PORT.tcp())
+    plan: &HostExposurePlan,
+) -> Result<ContainerAsync<GenericImage>, TestcontainersError> {
+    let mut sshd = GenericImage::new(plan.ssh_image, plan.ssh_tag)
+        .with_exposed_port(plan.ssh_port.tcp())
         .with_wait_for(WaitFor::seconds(1))
-        .with_env_var("PASSWORD", password.to_owned());
+        .with_env_var("PASSWORD", plan.password.clone());
 
-    if let Some(network) = network {
+    if let Some(network) = plan.network.as_deref() {
         sshd = sshd.with_network(network);
     }
 
-    let container = sshd.start().await?;
-    let host = container.get_host().await?;
-    let host_port = container.get_host_port_ipv4(SSH_PORT.tcp()).await?;
-    let bridge_ip = container.get_bridge_ip_address().await?;
-
-    Ok(SshSidecar {
-        container,
-        host,
-        host_port,
-        bridge_ip,
-    })
+    sshd.start().await
 }
 
 async fn establish_ssh_connection(
-    ssh_host: &UrlHost,
-    ssh_host_port: u16,
-    password: &str,
+    sidecar: &ContainerAsync<GenericImage>,
+    plan: &HostExposurePlan,
 ) -> Result<SshConnection, TestcontainersError> {
-    let tcp_stream = connect_with_retry(ssh_host, ssh_host_port).await?;
+    let ssh_host = sidecar.get_host().await?;
+    let ssh_host_port = match ssh_host {
+        UrlHost::Domain(_) => sidecar.get_host_port_ipv4(plan.ssh_port.tcp()).await?, // XXX: do we need to handle domain with IPv6 only?
+        UrlHost::Ipv4(_) => sidecar.get_host_port_ipv4(plan.ssh_port.tcp()).await?,
+        UrlHost::Ipv6(_) => sidecar.get_host_port_ipv6(plan.ssh_port.tcp()).await?,
+    };
+
+    let tcp_stream = connect_with_retry(&ssh_host, ssh_host_port, plan).await?;
 
     let config = client::Config {
         nodelay: true,
         keepalive_interval: Some(Duration::from_secs(10)),
         ..Default::default()
     };
-    let state = Arc::new(ForwardState::new());
+    let state: Arc<ForwardState> = Arc::new(ForwardState::new());
     let handler = HostExposeClient::new(Arc::clone(&state));
     let config = Arc::new(config);
 
@@ -254,7 +246,7 @@ async fn establish_ssh_connection(
         .map_err(TestcontainersError::from)?;
 
     let auth_result = handle
-        .authenticate_password(SSH_USERNAME, password)
+        .authenticate_password(plan.ssh_username, &plan.password)
         .await
         .map_err(|err| map_ssh_error("SSH authentication failed for host port exposure", err))?;
 
@@ -309,10 +301,14 @@ impl Drop for HostPortExposure {
     }
 }
 
-async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, TestcontainersError> {
+async fn connect_with_retry(
+    host: &UrlHost,
+    port: u16,
+    plan: &HostExposurePlan,
+) -> Result<TcpStream, TestcontainersError> {
     let host_str = host.to_string();
     let mut attempts = 0;
-    let mut delay = Duration::from_millis(SSH_CONNECTION_RETRY_DELAY_MS);
+    let mut delay = plan.ssh_retry_delay;
 
     loop {
         match TcpStream::connect((host_str.as_str(), port)).await {
@@ -324,13 +320,10 @@ async fn connect_with_retry(host: &UrlHost, port: u16) -> Result<TcpStream, Test
                 }
                 return Ok(stream);
             }
-            Err(err) if attempts < SSH_CONNECTION_MAX_ATTEMPTS => {
+            Err(err) if attempts < plan.ssh_max_attempts => {
                 attempts += 1;
                 sleep(delay).await;
-                delay = std::cmp::min(
-                    delay * 2,
-                    Duration::from_millis(SSH_CONNECTION_RETRY_MAX_DELAY_MS),
-                );
+                delay = std::cmp::min(delay * 2, plan.ssh_max_retry_delay);
                 log::trace!(
                     "waiting for sshd sidecar to be reachable at {host}:{port}: {err}",
                     host = host_str.as_str()
