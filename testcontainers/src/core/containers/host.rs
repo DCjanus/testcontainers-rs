@@ -1,20 +1,12 @@
-use std::{
-    convert::TryFrom,
-    future,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::{convert::TryFrom, future, sync::Arc, time::Duration};
 
 use russh::{client, Channel, Disconnect};
 use tokio::{
     io::{self, copy_bidirectional, AsyncWriteExt},
     net::TcpStream,
-    task::JoinHandle,
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 use url::Host as UrlHost;
 
@@ -40,7 +32,7 @@ const SSH_PORT: u16 = 22;
 pub(crate) struct HostPortExposure {
     _sidecar: Box<ContainerAsync<GenericImage>>,
     ssh_handle: Option<client::Handle<HostExposeClient>>,
-    state: Arc<ForwardState>,
+    cancel_token: CancellationToken,
 }
 
 impl HostPortExposure {
@@ -67,20 +59,15 @@ impl HostPortExposure {
         // Stage 4: request remote port forwards for every requested host port.
         register_requested_ports(&plan.requested_ports, &mut ssh_connection.handle).await?;
 
-        let SshConnection {
-            handle: ssh_handle,
-            state,
-        } = ssh_connection;
-
         Ok(Some(Self {
             _sidecar: Box::new(sidecar),
-            ssh_handle: Some(ssh_handle),
-            state,
+            ssh_handle: Some(ssh_connection.handle),
+            cancel_token: ssh_connection.cancel_token,
         }))
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.state.stop();
+        self.cancel_token.cancel();
 
         if let Some(handle) = self.ssh_handle.take() {
             if tokio::runtime::Handle::try_current().is_ok() {
@@ -98,16 +85,12 @@ impl HostPortExposure {
                 });
             }
         }
-
-        for task in self.state.drain_tasks() {
-            task.abort();
-        }
     }
 }
 
 struct SshConnection {
     handle: client::Handle<HostExposeClient>,
-    state: Arc<ForwardState>,
+    cancel_token: CancellationToken,
 }
 
 struct HostExposurePlan {
@@ -234,8 +217,8 @@ async fn establish_ssh_connection(
         keepalive_interval: Some(Duration::from_secs(10)),
         ..Default::default()
     };
-    let state: Arc<ForwardState> = Arc::new(ForwardState::new());
-    let handler = HostExposeClient::new(Arc::clone(&state));
+    let cancel_token = CancellationToken::new();
+    let handler = HostExposeClient::new(cancel_token.clone());
     let config = Arc::new(config);
 
     let mut handle = client::connect_stream(config, tcp_stream, handler)
@@ -253,7 +236,10 @@ async fn establish_ssh_connection(
         ));
     }
 
-    Ok(SshConnection { handle, state })
+    Ok(SshConnection {
+        handle,
+        cancel_token,
+    })
 }
 
 async fn register_requested_ports(
@@ -328,105 +314,76 @@ async fn connect_with_retry(
     }
 }
 
-async fn forward_connection(
-    channel: Channel<client::Msg>,
-    host_port: u16,
-    remote_port: u16,
-    connected_address: String,
-    originator_address: String,
-    originator_port: u32,
-    stop_flag: Arc<AtomicBool>,
-) -> io::Result<()> {
-    // Abort quickly when a shutdown is already in progress to avoid spawning new work.
-    if stop_flag.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-
-    // Establish a local TCP connection that mirrors the SSH reverse tunnel.
-    let mut stream = match TcpStream::connect(("localhost", host_port)).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            log::error!(
-                "failed to connect to host port {host_port} for exposure tunnel (remote {remote_port} via {connected_address} from {originator_address}:{originator_port}): {err}"
-            );
-            return Err(err);
-        }
-    };
-
-    if let Err(err) = stream.set_nodelay(true) {
-        log::debug!("failed to configure tcp stream for host exposure port {host_port}: {err}");
-    }
-
-    let mut channel_stream = channel.into_stream();
-
-    // Pump bytes in both directions until either side closes the connection.
-    copy_bidirectional(&mut channel_stream, &mut stream).await?;
-
-    if let Err(err) = stream.shutdown().await {
-        log::trace!(
-            "failed to shutdown tcp stream after host exposure proxy for port {remote_port}: {err}"
-        );
-    }
-
-    Ok(())
-}
-
 fn map_ssh_error(context: &str, err: russh::Error) -> TestcontainersError {
     TestcontainersError::other(format!("{context}: {err}"))
 }
 
-#[derive(Debug)]
-struct ForwardState {
-    stop_flag: Arc<AtomicBool>,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
-}
-
-impl ForwardState {
-    fn new() -> Self {
-        Self {
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            tasks: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn stop(&self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
-    }
-
-    fn is_stopped(&self) -> bool {
-        self.stop_flag.load(Ordering::SeqCst)
-    }
-
-    fn stop_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.stop_flag)
-    }
-
-    fn add_task(&self, handle: JoinHandle<()>) {
-        let mut tasks = self
-            .tasks
-            .lock()
-            .expect("forward state task list lock poisoned");
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
-    }
-
-    fn drain_tasks(&self) -> Vec<JoinHandle<()>> {
-        self.tasks
-            .lock()
-            .expect("forward state task list lock poisoned")
-            .drain(..)
-            .collect()
-    }
-}
-
 #[derive(Clone)]
 struct HostExposeClient {
-    state: Arc<ForwardState>,
+    cancel_token: CancellationToken,
 }
 
 impl HostExposeClient {
-    fn new(state: Arc<ForwardState>) -> Self {
-        Self { state }
+    fn new(cancel_token: CancellationToken) -> Self {
+        Self { cancel_token }
+    }
+
+    async fn prepare_forwarding_stream(
+        &self,
+        remote_port: u16,
+        connected_address: &str,
+        originator_address: &str,
+        originator_port: u32,
+    ) -> Result<TcpStream, HostExposeError> {
+        let stream = TcpStream::connect(("localhost", remote_port)).await.map_err(|err| {
+            log::error!(
+                "failed to connect to host port {remote_port} for exposure tunnel (via {connected_address} from {originator_address}:{originator_port}): {err}"
+            );
+            HostExposeError::Exposure(TestcontainersError::other(format!(
+                "failed to connect to host port {remote_port} for exposure tunnel (via {connected_address} from {originator_address}:{originator_port}): {err}",
+            )))
+        })?;
+
+        stream.set_nodelay(true).map_err(|err| {
+            log::debug!(
+                "failed to configure tcp stream for host exposure port {remote_port}: {err}"
+            );
+            HostExposeError::Exposure(TestcontainersError::other(format!(
+                "failed to configure tcp stream for host exposure port {remote_port}: {err}",
+            )))
+        })?;
+
+        Ok(stream)
+    }
+
+    async fn forward_connection(
+        &self,
+        channel: Channel<client::Msg>,
+        mut stream: TcpStream,
+        port: u16,
+    ) -> io::Result<()> {
+        if self.cancel_token.is_cancelled() {
+            return Ok(());
+        }
+
+        let mut channel_stream = channel.into_stream();
+        let cancellation = self.cancel_token.cancelled();
+        tokio::pin!(cancellation);
+
+        tokio::select! {
+            result = copy_bidirectional(&mut channel_stream, &mut stream) => {
+                result?;
+            }
+            _ = &mut cancellation => {}
+        }
+
+        if let Err(err) = stream.shutdown().await {
+            log::trace!(
+                "failed to shutdown tcp stream after host exposure proxy for port {port}: {err}"
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -437,6 +394,7 @@ impl client::Handler for HostExposeClient {
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
     ) -> impl future::Future<Output = Result<bool, Self::Error>> + Send {
+        // skip server key verification for the ephemeral SSHD sidecar
         future::ready(Ok(true))
     }
 
@@ -449,41 +407,36 @@ impl client::Handler for HostExposeClient {
         originator_port: u32,
         _session: &mut client::Session,
     ) -> impl future::Future<Output = Result<(), Self::Error>> + Send {
-        let state = Arc::clone(&self.state);
+        let client = self.clone();
         let connected_address = connected_address.to_string();
         let originator_address = originator_address.to_string();
         async move {
-            if state.is_stopped() {
+            if client.cancel_token.is_cancelled() {
                 return Ok(());
             }
 
             let remote_port = u16::try_from(connected_port)
                 .expect("forwarded connection reported port outside u16 range");
 
-            let stop_flag = state.stop_flag();
-            let handle = tokio::spawn(async move {
-                if stop_flag.load(Ordering::SeqCst) {
-                    return;
-                }
-
-                if let Err(err) = forward_connection(
-                    channel,
+            let stream = client
+                .prepare_forwarding_stream(
                     remote_port,
-                    remote_port,
-                    connected_address,
-                    originator_address,
+                    connected_address.as_str(),
+                    originator_address.as_str(),
                     originator_port,
-                    stop_flag,
                 )
-                .await
+                .await?;
+
+            tokio::spawn(async move {
+                if let Err(err) = client
+                    .forward_connection(channel, stream, remote_port)
+                    .await
                 {
                     log::debug!(
                         "host port exposure proxy for remote port {remote_port} ended with error: {err}"
                     );
                 }
             });
-
-            state.add_task(handle);
 
             Ok(())
         }
