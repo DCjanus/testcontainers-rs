@@ -25,12 +25,12 @@
 
 ## 修改方案
 - 将 `russh` 设为可选依赖，引入名为 `host-port-exposure` 的 cargo feature，开启时才启用 `russh`；同时配置其仅使用 `aws-lc-rs` 或其它非 `ring` 的加密后端，且不启用 `rsa` feature。
-- 在 `core::containers::host` 中使用 `#[cfg(feature = "host-port-exposure")]` 包裹现有 `HostPortExposure` 实现；未开启特性时使用轻量 stub，在调用 `with_exposed_host_port(s)` 时返回清晰的错误信息。
-- 将主机端口暴露相关的集成测试、示例和文档都放在同一 feature 下，避免在未开启特性时破坏构建或测试。
+- 在 `core::containers::mod.rs` 中以 `#[cfg(feature = "host-port-exposure")]` 修饰 `mod host` 的声明，从根源上跳过整个模块与关联依赖，避免在未开启特性时仍编译相关代码。
+- 将主机端口暴露相关的集成测试、示例和文档都放在同一 feature 下，并通过条件编译完全跳过这些代码，避免在未开启特性时破坏构建或测试。
 - 在 crate README 与 changelog 中说明新特性，并告诉用户如何启用以使用主机端口暴露能力。
 
 ## 实施要点
-- 保持 `with_exposed_host_port(s)` API 始终可用，这样现有代码依旧能编译；当未开启特性时通过 stub 在运行时提示需要启用该 feature。
+- 通过条件编译控制 `with_exposed_host_port(s)` 等 API 的可用性：启用 feature 时正常暴露；关闭时通过 `cfg` gate 排除相关模块与 re-export，确保编译期就不会出现未实现的 API。
 - 尽量控制改动范围，预计只需修改 `testcontainers/Cargo.toml`、`core/containers/host.rs`、`runners/async_runner.rs`、`core/containers/async_container.rs`、相关测试以及文档。
 - 复用或增加一个仅在启用 `host-port-exposure` 时编译的集成测试，以确保 CI 能覆盖 SSH 隧道路径。
 - 选择语义明确的 feature 名称（`host-port-exposure`），未来若出现其他隧道实现，也可以在同一特性下扩展，而不会让不需要的依赖回到默认构建。
