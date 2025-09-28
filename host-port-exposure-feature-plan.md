@@ -18,6 +18,17 @@
 - 将相关集成测试、示例和文档同样置于该 feature 下，避免默认构建受影响。
 - 在 README 和 changelog 中补充启用方式与注意事项。
 
+## 全局要求
+- 所有提交信息必须使用英文语义化规范（如 `feat: ...`、`fix: ...`），并保持简洁精准地描述改动。
+- 每次完成阶段性修改后，至少运行以下命令验证不同 feature 组合：
+  ```bash
+  cargo fmt --all
+  cargo clippy --no-default-features
+  cargo clippy --features host-port-exposure
+  cargo clippy --features reusable-containers
+  cargo clippy --features host-port-exposure,reusable-containers
+  ```
+
 ## 背景
 - [issue #821](https://github.com/testcontainers/testcontainers-rs/issues/821) 希望在不依赖 Docker Desktop DNS 技巧的前提下，实现容器访问宿主机端口。
 - [PR #846](https://github.com/testcontainers/testcontainers-rs/pull/846) 通过引入 SSH sidecar 做反向隧道来满足这一需求。
@@ -41,7 +52,7 @@
    - 在 `[features]` 中新增 `host-port-exposure`，列出 `russh` 及所需的 `aws-lc-rs`、`bollard/aws-lc-rs` 等依赖；同步调整 `default` feature，避免在默认构建时引入 `russh`。
    - 为相关 dev-dependencies 和示例增加 `cfg(feature = "host-port-exposure")`，并在 `[[test]]` 节点上声明 `required-features = ["host-port-exposure"]`，确保默认测试集不触发额外依赖。
 
-2. **核心模块条件编译**（待完成）
+2. **核心模块条件编译**（已完成）
    - 在 `core/containers/mod.rs` 使用 `#[cfg(feature = "host-port-exposure")] mod host;`，并对对应的 `pub use` 与其他模块引用保持一致的条件编译处理。
    - `ContainerAsync` 结构体中的 `host_port_exposure` 字段、构造参数与 `Drop` 实现采用 `cfg(feature = "host-port-exposure")` 包裹；未启用特性时完全移除该字段，避免空引用。
    - 在 `AsyncRunner` 与 `SyncRunner` 中，将 `HostPortExposure::setup`、清理逻辑以及任何 `use super::host` 的语句放在 feature gate 内；必要时提供一个 `cfg(not(feature = ...))` 的轻量 helper 以确保其余代码路径仍能编译。
