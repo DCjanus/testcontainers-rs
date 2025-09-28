@@ -57,7 +57,7 @@
    - `ContainerAsync` 结构体中的 `host_port_exposure` 字段、构造参数与 `Drop` 实现采用 `cfg(feature = "host-port-exposure")` 包裹；未启用特性时完全移除该字段，避免空引用。
    - 在 `AsyncRunner` 与 `SyncRunner` 中，将 `HostPortExposure::setup`、清理逻辑以及任何 `use super::host` 的语句放在 feature gate 内；必要时提供一个 `cfg(not(feature = ...))` 的轻量 helper 以确保其余代码路径仍能编译。
 
-3. **API 与请求结构调整**（待完成）
+3. **API 与请求结构调整**（已完成）
    - 为 `ImageExt::with_exposed_host_port(s)`、`ContainerRequest::with_exposed_host_port(s)` 以及 `host_port_exposures` 字段和访问器添加 `#[cfg(feature = "host-port-exposure")]`，并更新文档注释提示所需 feature。
    - 梳理 `ContainerRequest` 的 `Default` / builder 逻辑，确认在 feature 关闭时不会出现未使用字段或 `serde` 反序列化错误；必要时使用 `cfg_attr` 维持序列化兼容性或提供 feature 专属结构体。
 
