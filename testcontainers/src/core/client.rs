@@ -17,13 +17,15 @@ use bollard::{
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
-        CreateImageOptionsBuilder, InspectContainerOptions, InspectContainerOptionsBuilder,
-        InspectNetworkOptions, InspectNetworkOptionsBuilder, ListContainersOptionsBuilder,
-        ListNetworksOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-        StartContainerOptions, StopContainerOptionsBuilder, UploadToContainerOptionsBuilder,
+        CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder, InspectContainerOptions,
+        InspectContainerOptionsBuilder, InspectNetworkOptions, InspectNetworkOptionsBuilder,
+        ListContainersOptionsBuilder, ListNetworksOptions, LogsOptionsBuilder,
+        RemoveContainerOptionsBuilder, StartContainerOptions, StopContainerOptionsBuilder,
+        UploadToContainerOptionsBuilder,
     },
     Docker,
 };
+use bytes::BytesMut;
 use ferroid::{base32::Base32UlidExt, id::ULID};
 use futures::{StreamExt, TryStreamExt};
 use tokio::sync::{Mutex, OnceCell};
@@ -31,7 +33,10 @@ use url::Url;
 
 use crate::core::{
     client::exec::ExecResult,
-    copy::{CopyToContainer, CopyToContainerCollection, CopyToContainerError},
+    copy::{
+        CopyFromArchive, CopyFromContainerError, CopyToContainer, CopyToContainerCollection,
+        CopyToContainerError,
+    },
     env::{self, ConfigurationError},
     logs::{
         stream::{LogStream, RawLogStream},
@@ -127,6 +132,10 @@ pub enum ClientError {
     UploadToContainerError(BollardError),
     #[error("failed to prepare data for copy-to-container: {0}")]
     CopyToContainerError(CopyToContainerError),
+    #[error("failed to download data from container: {0}")]
+    DownloadFromContainerError(BollardError),
+    #[error("failed to handle data copied from container: {0}")]
+    CopyFromContainerError(CopyFromContainerError),
 }
 
 /// The internal client.
@@ -402,6 +411,30 @@ impl Client {
             .upload_to_container(&container_id, Some(options), body_full(tar))
             .await
             .map_err(ClientError::UploadToContainerError)
+    }
+
+    pub(crate) async fn copy_from_container(
+        &self,
+        container_id: impl AsRef<str>,
+        container_path: impl AsRef<str>,
+    ) -> Result<CopyFromArchive, ClientError> {
+        let container_id = container_id.as_ref();
+        let container_path = container_path.as_ref().to_owned();
+        let options = DownloadFromContainerOptionsBuilder::new()
+            .path(&container_path)
+            .build();
+
+        let buffer = self
+            .bollard
+            .download_from_container(container_id, Some(options))
+            .try_fold(BytesMut::new(), |mut acc, chunk| async move {
+                acc.extend_from_slice(&chunk);
+                Ok(acc)
+            })
+            .await
+            .map_err(ClientError::DownloadFromContainerError)?;
+
+        Ok(CopyFromArchive::new(buffer.freeze()))
     }
 
     pub(crate) async fn container_is_running(

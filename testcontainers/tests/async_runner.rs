@@ -11,9 +11,9 @@ use testcontainers::{
         BuildImageOptions, CmdWaitFor, ExecCommand, WaitFor,
     },
     runners::{AsyncBuilder, AsyncRunner},
-    GenericBuildableImage, GenericImage, Image, ImageExt,
+    CopyFromOutcome, GenericBuildableImage, GenericImage, Image, ImageExt,
 };
-use tokio::io::AsyncReadExt;
+use tokio::{fs, io::AsyncReadExt};
 
 #[derive(Debug, Default)]
 pub struct HelloWorld;
@@ -289,6 +289,63 @@ async fn async_copy_files_to_container() -> anyhow::Result<()> {
     assert!(out.contains("foofoofoo"));
     assert!(out.contains("barbarbar"));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn async_copy_file_from_container() -> anyhow::Result<()> {
+    let temp_dir = temp_dir::TempDir::new()?;
+    let file_on_host = temp_dir.child("original.txt");
+    std::fs::write(&file_on_host, b"container payload")?;
+
+    let container = GenericImage::new("alpine", "latest")
+        .with_wait_for(WaitFor::seconds(2))
+        .with_copy_to("/tmp/original.txt", file_on_host)
+        .with_cmd(vec!["sleep", "60"])
+        .start()
+        .await?;
+
+    let destination_dir = tempfile::tempdir()?;
+    let destination = destination_dir.path().join("copied.txt");
+
+    let outcome = container
+        .copy_file_from("/tmp/original.txt", &destination)
+        .await?;
+
+    assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
+
+    let copied = fs::read(&destination).await?;
+    assert_eq!(copied, b"container payload");
+
+    container.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn async_copy_directory_from_container() -> anyhow::Result<()> {
+    let source_dir = tempfile::tempdir()?;
+    let nested = source_dir.path().join("nested");
+    std::fs::create_dir_all(&nested)?;
+    std::fs::write(nested.join("data.txt"), b"from directory")?;
+
+    let container = GenericImage::new("alpine", "latest")
+        .with_wait_for(WaitFor::seconds(2))
+        .with_copy_to("/opt/data", source_dir.path())
+        .with_cmd(vec!["sleep", "60"])
+        .start()
+        .await?;
+
+    let destination_root = tempfile::tempdir()?;
+    let destination = destination_root.path().join("extracted");
+
+    let outcome = container.copy_dir_from("/opt/data", &destination).await?;
+
+    assert!(matches!(outcome, CopyFromOutcome::Directory(ref path) if path == &destination));
+
+    let copied = fs::read(destination.join("opt/data/nested/data.txt")).await?;
+    assert_eq!(copied, b"from directory");
+
+    container.stop().await?;
     Ok(())
 }
 

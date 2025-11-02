@@ -1,10 +1,12 @@
-use std::{fmt, net::IpAddr, pin::Pin, str::FromStr, sync::Arc, time::Duration};
+use std::{fmt, net::IpAddr, path::PathBuf, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 
 use super::{exec, Client};
 use crate::{
     core::{
+        client::ClientError,
+        copy::{CopyFromArchive, CopyFromOutcome},
         error::{ContainerMissingInfo, ExecError, Result},
         ports::Ports,
         wait::WaitStrategy,
@@ -36,6 +38,42 @@ impl RawContainer {
 
     pub async fn ports(&self) -> Result<Ports> {
         self.docker_client.ports(&self.id).await.map_err(Into::into)
+    }
+
+    pub async fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
+        let container_path = container_path.into();
+        self.docker_client
+            .copy_from_container(self.id(), &container_path)
+            .await
+            .map_err(TestcontainersError::from)
+    }
+
+    pub async fn copy_file_from(
+        &self,
+        container_path: impl Into<String>,
+        destination: PathBuf,
+    ) -> Result<CopyFromOutcome> {
+        let archive = self.copy_from(container_path).await?;
+
+        archive
+            .write_to_file(&destination)
+            .await
+            .map_err(ClientError::CopyFromContainerError)
+            .map_err(TestcontainersError::from)
+    }
+
+    pub async fn copy_directory_from(
+        &self,
+        container_path: impl Into<String>,
+        destination: PathBuf,
+    ) -> Result<CopyFromOutcome> {
+        let archive = self.copy_from(container_path).await?;
+
+        archive
+            .extract_to_dir(&destination)
+            .await
+            .map_err(ClientError::CopyFromContainerError)
+            .map_err(TestcontainersError::from)
     }
 
     /// Returns the mapped host port for an internal port of this docker container, on the host's

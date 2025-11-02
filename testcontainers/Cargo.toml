@@ -45,10 +45,11 @@ thiserror = "2.0.3"
 tokio = { version = "1", features = ["macros", "fs", "rt-multi-thread", "process"] }
 tokio-stream = "0.1.15"
 astral-tokio-tar = "0.5.6"
-tokio-util = { version = "0.7.10", features = ["io"] }
+tokio-util = { version = "0.7.10", features = ["io", "io-util"] }
 ferroid = { version = "0.8.2", features = ["std", "ulid", "base32"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1.8.0", features = ["v4"], optional = true }
+tar = "0.4"
 
 [features]
 default = ["ring"]

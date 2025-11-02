@@ -1,11 +1,19 @@
-use std::{fmt, ops::Deref, sync::Arc};
+use std::{fmt, ops::Deref, path::PathBuf, sync::Arc};
 
 use tokio_stream::StreamExt;
 
 #[cfg(feature = "host-port-exposure")]
 use super::host::HostPortExposure;
 use crate::{
-    core::{async_drop, client::Client, env, error::Result, network::Network, ContainerState},
+    core::{
+        async_drop,
+        client::Client,
+        copy::{CopyFromArchive, CopyFromOutcome},
+        env,
+        error::Result,
+        network::Network,
+        ContainerState,
+    },
     ContainerRequest, Image,
 };
 
@@ -177,6 +185,36 @@ where
     pub async fn exit_code(&self) -> Result<Option<i64>> {
         let exit_code = self.docker_client().container_exit_code(self.id()).await?;
         Ok(exit_code)
+    }
+
+    pub async fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
+        self.raw.copy_from(container_path).await
+    }
+
+    pub async fn copy_file_from<P>(
+        &self,
+        container_path: impl Into<String>,
+        destination: P,
+    ) -> Result<CopyFromOutcome>
+    where
+        P: AsRef<std::path::Path> + Send + 'static,
+    {
+        let destination: PathBuf = destination.as_ref().to_path_buf();
+        self.raw.copy_file_from(container_path, destination).await
+    }
+
+    pub async fn copy_dir_from<P>(
+        &self,
+        container_path: impl Into<String>,
+        destination: P,
+    ) -> Result<CopyFromOutcome>
+    where
+        P: AsRef<std::path::Path> + Send + 'static,
+    {
+        let destination: PathBuf = destination.as_ref().to_path_buf();
+        self.raw
+            .copy_directory_from(container_path, destination)
+            .await
     }
 
     /// Removes the container.

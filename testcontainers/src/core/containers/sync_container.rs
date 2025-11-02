@@ -1,7 +1,13 @@
-use std::{fmt, io::BufRead, net::IpAddr, sync::Arc};
+use std::{fmt, io::BufRead, net::IpAddr, path::PathBuf, sync::Arc};
 
 use crate::{
-    core::{env, error::Result, ports::Ports, ContainerPort, ExecCommand},
+    core::{
+        copy::{CopyFromArchive, CopyFromOutcome},
+        env,
+        error::Result,
+        ports::Ports,
+        ContainerPort, ExecCommand,
+    },
     ContainerAsync, Image,
 };
 
@@ -128,6 +134,36 @@ where
             inner: async_exec,
             runtime: self.rt().clone(),
         })
+    }
+
+    pub fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
+        let container_path = container_path.into();
+        self.rt()
+            .block_on(self.async_impl().copy_from(container_path))
+    }
+
+    pub fn copy_file_from(
+        &self,
+        container_path: impl Into<String>,
+        destination: impl AsRef<std::path::Path>,
+    ) -> Result<CopyFromOutcome> {
+        let container_path = container_path.into();
+        let destination = destination.as_ref().to_path_buf();
+        self.rt().block_on(
+            self.async_impl()
+                .copy_file_from(container_path, destination),
+        )
+    }
+
+    pub fn copy_dir_from(
+        &self,
+        container_path: impl Into<String>,
+        destination: impl AsRef<std::path::Path>,
+    ) -> Result<CopyFromOutcome> {
+        let container_path = container_path.into();
+        let destination = destination.as_ref().to_path_buf();
+        self.rt()
+            .block_on(self.async_impl().copy_dir_from(container_path, destination))
     }
 
     /// Stops the container (not the same with `pause`) using the default 10 second timeout.
