@@ -21,24 +21,30 @@ pub enum CopyDataSource {
     Data(Vec<u8>),
 }
 
+/// Container data captured as a TAR archive returned by the Docker copy API.
 #[derive(Debug, Clone)]
 pub struct CopyFromArchive {
     bytes: bytes::Bytes,
 }
 
+/// Outcome of extracting data that was copied from a container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyFromOutcome {
+    /// A single file was extracted to the provided host path.
     File(PathBuf),
+    /// A directory tree was unpacked into the provided host path.
     Directory(PathBuf),
 }
 
 impl CopyFromOutcome {
+    /// Returns a borrowed view of the path that received the copied contents.
     pub fn path(&self) -> &Path {
         match self {
             CopyFromOutcome::File(path) | CopyFromOutcome::Directory(path) => path.as_path(),
         }
     }
 
+    /// Consumes the outcome and yields the owned destination path.
     pub fn into_path(self) -> PathBuf {
         match self {
             CopyFromOutcome::File(path) | CopyFromOutcome::Directory(path) => path,
@@ -46,6 +52,7 @@ impl CopyFromOutcome {
     }
 }
 
+/// Errors that can occur while materializing data copied from a container.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyFromContainerError {
     #[error("io failed with error: {0}")]
@@ -76,14 +83,20 @@ impl CopyFromArchive {
         Self { bytes }
     }
 
+    /// Returns the raw TAR bytes as downloaded from the container.
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.as_ref()
     }
 
+    /// Consumes the archive and returns its raw TAR payload.
     pub fn into_bytes(self) -> bytes::Bytes {
         self.bytes
     }
 
+    /// Writes the first regular file inside the archive to `destination`.
+    ///
+    /// Fails if the archive contains zero or multiple regular files or if the entry is not
+    /// compatible with a single-file destination.
     pub async fn write_to_file(
         self,
         destination: impl AsRef<Path>,
@@ -101,6 +114,7 @@ impl CopyFromArchive {
         result
     }
 
+    /// Extracts the entire archive into the provided destination directory.
     pub async fn extract_to_dir(
         self,
         destination: impl AsRef<Path>,
@@ -118,6 +132,8 @@ impl CopyFromArchive {
         result
     }
 
+    /// Inspects the archive contents and automatically chooses between writing a single file
+    /// or unpacking the full directory tree based on the number of entries.
     pub async fn extract(
         self,
         destination: impl AsRef<Path>,

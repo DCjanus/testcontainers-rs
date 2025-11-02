@@ -40,6 +40,7 @@ impl RawContainer {
         self.docker_client.ports(&self.id).await.map_err(Into::into)
     }
 
+    /// Downloads the item located at `container_path` inside the container as a TAR archive.
     pub async fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
         let container_path = container_path.into();
         self.docker_client
@@ -48,6 +49,8 @@ impl RawContainer {
             .map_err(TestcontainersError::from)
     }
 
+    /// Writes the contents of `container_path` to a single file on the host, returning the
+    /// extracted destination path.
     pub async fn copy_file_from(
         &self,
         container_path: impl Into<String>,
@@ -62,6 +65,7 @@ impl RawContainer {
             .map_err(TestcontainersError::from)
     }
 
+    /// Expands a directory from the container into the given host destination directory.
     pub async fn copy_directory_from(
         &self,
         container_path: impl Into<String>,

@@ -136,12 +136,15 @@ where
         })
     }
 
+    /// Downloads the contents at `container_path` into a TAR archive without touching the host
+    /// filesystem.
     pub fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
         let container_path = container_path.into();
         self.rt()
             .block_on(self.async_impl().copy_from(container_path))
     }
 
+    /// Copies a single file from the container into the supplied host destination path.
     pub fn copy_file_from(
         &self,
         container_path: impl Into<String>,
@@ -155,6 +158,7 @@ where
         )
     }
 
+    /// Extracts a directory tree from the container into the given host destination.
     pub fn copy_dir_from(
         &self,
         container_path: impl Into<String>,

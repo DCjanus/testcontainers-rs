@@ -187,10 +187,13 @@ where
         Ok(exit_code)
     }
 
+    /// Downloads the contents at `container_path` as a TAR archive without writing to disk.
     pub async fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
         self.raw.copy_from(container_path).await
     }
 
+    /// Copies a single regular file from the container into a host destination and returns the
+    /// resulting [`CopyFromOutcome`].
     pub async fn copy_file_from<P>(
         &self,
         container_path: impl Into<String>,
@@ -203,6 +206,7 @@ where
         self.raw.copy_file_from(container_path, destination).await
     }
 
+    /// Recursively extracts a container directory into the given host destination.
     pub async fn copy_dir_from<P>(
         &self,
         container_path: impl Into<String>,
