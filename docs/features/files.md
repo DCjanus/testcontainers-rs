@@ -1,6 +1,6 @@
 # Files And Mounts
 
-Rust Testcontainers lets you seed container filesystems before startup, retrieve artifacts produced inside containers, and bind host paths at runtime. The APIs mirror the ergonomics of the Java library while following idiomatic Rust patterns.citeturn0search0
+Rust Testcontainers lets you seed container filesystems before startup, retrieve artifacts produced inside containers, and bind host paths at runtime. The APIs mirror the ergonomics of the Java library while following idiomatic Rust patterns.
 
 ## Copying Files Into Containers
 
@@ -84,4 +84,4 @@ Bind mounts share host state directly, while tmpfs mounts give you ephemeral in-
 - **Copy from containers** to capture build artifacts, logs, or fixtures produced during a test run.
 - **Mounts** when the container must read/write large amounts of data without re-tarring it every time.
 
-Mixing these tools keeps tests hermetic while still letting you inspect outputs locally. Document each choice in code so teammates know whether data is ephemeral (`tmpfs`), seeded once (`with_copy_to`), or captured for later assertions (`copy_file_from`).*** End Patch
+Mixing these tools keeps tests hermetic while still letting you inspect outputs locally. Document each choice in code so teammates know whether data is ephemeral (`tmpfs`), seeded once (`with_copy_to`), or captured for later assertions (`copy_file_from`).
