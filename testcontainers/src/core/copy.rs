@@ -1,10 +1,14 @@
 use std::{
-    io::{self, Cursor},
+    io,
     path::{Path, PathBuf},
 };
 
-use tar::{Archive as TarArchive, EntryType};
-use tokio::{fs, task};
+use tokio::{
+    fs,
+    io::{self as tokio_io, AsyncRead, AsyncWriteExt},
+};
+use tokio_stream::StreamExt;
+use tokio_tar::{Archive as AsyncTarArchive, EntryType};
 
 #[derive(Debug, Clone)]
 pub struct CopyToContainerCollection(Vec<CopyToContainer>);
@@ -19,12 +23,6 @@ pub struct CopyToContainer {
 pub enum CopyDataSource {
     File(PathBuf),
     Data(Vec<u8>),
-}
-
-/// Container data captured as a TAR archive returned by the Docker copy API.
-#[derive(Debug, Clone)]
-pub struct CopyFromArchive {
-    bytes: bytes::Bytes,
 }
 
 /// Outcome of extracting data that was copied from a container.
@@ -57,8 +55,6 @@ impl CopyFromOutcome {
 pub enum CopyFromContainerError {
     #[error("io failed with error: {0}")]
     Io(#[from] io::Error),
-    #[error("failed to join blocking task: {0}")]
-    BlockingJoin(#[from] task::JoinError),
     #[error("archive did not contain any regular files; cannot write to {destination}")]
     EmptyArchive { destination: PathBuf },
     #[error("archive contains multiple regular files; cannot write to single-file destination {destination}")]
@@ -70,102 +66,80 @@ pub enum CopyFromContainerError {
     },
 }
 
+/// Stream the tar payload coming from the container and persist the single regular file
+/// exposed by our `copy_file_from` API. We iterate entry-by-entry to support large files
+/// without buffering the entire archive in memory and refuse archives that contain more
+/// than one regular file.
+pub(crate) async fn write_single_file_from_tar_reader<R>(
+    reader: R,
+    destination: PathBuf,
+) -> Result<CopyFromOutcome, CopyFromContainerError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut archive = AsyncTarArchive::new(reader);
+    let mut entries = archive.entries().map_err(CopyFromContainerError::Io)?;
+    let mut file_written = false;
+
+    while let Some(entry_result) = entries.next().await {
+        let mut entry = entry_result.map_err(CopyFromContainerError::Io)?;
+        let entry_type = entry.header().entry_type();
+
+        if entry_type.is_file() || entry_type.is_contiguous() {
+            if file_written {
+                return Err(CopyFromContainerError::MultipleRegularFiles {
+                    destination: destination.clone(),
+                });
+            }
+
+            // We lazily create the destination parent to avoid assuming the caller prepared
+            // the filesystem ahead of time, but only when it is meaningful (non-empty path).
+            if let Some(parent) = destination.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(CopyFromContainerError::Io)?;
+                }
+            }
+
+            let mut file = fs::File::create(&destination)
+                .await
+                .map_err(CopyFromContainerError::Io)?;
+            tokio_io::copy(&mut entry, &mut file)
+                .await
+                .map_err(CopyFromContainerError::Io)?;
+            file.flush().await.map_err(CopyFromContainerError::Io)?;
+
+            file_written = true;
+        } else if entry_type.is_dir()
+            || entry_type.is_gnu_longname()
+            || entry_type.is_gnu_longlink()
+            || entry_type.is_pax_global_extensions()
+            || entry_type.is_pax_local_extensions()
+            || entry_type.is_gnu_sparse()
+        {
+            continue;
+        } else {
+            return Err(CopyFromContainerError::UnsupportedEntryType {
+                destination,
+                entry_type,
+            });
+        }
+    }
+
+    if file_written {
+        Ok(CopyFromOutcome::File(destination))
+    } else {
+        Err(CopyFromContainerError::EmptyArchive { destination })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CopyToContainerError {
     #[error("io failed with error: {0}")]
     IoError(io::Error),
     #[error("failed to get the path name: {0}")]
     PathNameError(String),
-}
-
-impl CopyFromArchive {
-    pub(crate) fn new(bytes: bytes::Bytes) -> Self {
-        Self { bytes }
-    }
-
-    /// Returns the raw TAR bytes as downloaded from the container.
-    pub fn as_bytes(&self) -> &[u8] {
-        self.bytes.as_ref()
-    }
-
-    /// Consumes the archive and returns its raw TAR payload.
-    pub fn into_bytes(self) -> bytes::Bytes {
-        self.bytes
-    }
-
-    /// Writes the first regular file inside the archive to `destination`.
-    ///
-    /// Fails if the archive contains zero or multiple regular files or if the entry is not
-    /// compatible with a single-file destination.
-    pub async fn write_to_file(
-        self,
-        destination: impl AsRef<Path>,
-    ) -> Result<CopyFromOutcome, CopyFromContainerError> {
-        let destination = destination.as_ref().to_path_buf();
-        let bytes = self.bytes;
-
-        let result = task::spawn_blocking(move || {
-            let buffer = bytes.to_vec();
-            write_single_file_from_archive(&buffer, destination)
-        })
-        .await
-        .map_err(CopyFromContainerError::BlockingJoin)?;
-
-        result
-    }
-
-    /// Extracts the entire archive into the provided destination directory.
-    pub async fn extract_to_dir(
-        self,
-        destination: impl AsRef<Path>,
-    ) -> Result<CopyFromOutcome, CopyFromContainerError> {
-        let destination = destination.as_ref().to_path_buf();
-        let bytes = self.bytes;
-
-        let result = task::spawn_blocking(move || {
-            let buffer = bytes.to_vec();
-            extract_archive_to_dir(&buffer, destination)
-        })
-        .await
-        .map_err(CopyFromContainerError::BlockingJoin)?;
-
-        result
-    }
-
-    /// Inspects the archive contents and automatically chooses between writing a single file
-    /// or unpacking the full directory tree based on the number of entries.
-    pub async fn extract(
-        self,
-        destination: impl AsRef<Path>,
-    ) -> Result<CopyFromOutcome, CopyFromContainerError> {
-        let destination = destination.as_ref().to_path_buf();
-        let destination_is_dir = fs::symlink_metadata(&destination)
-            .await
-            .map(|meta| meta.is_dir())
-            .unwrap_or(false);
-        let bytes = self.bytes;
-
-        let result = task::spawn_blocking(move || {
-            let buffer = bytes.to_vec();
-            let stats = analyze_archive(&buffer)?;
-
-            if destination_is_dir || stats.should_extract_as_directory() {
-                return extract_archive_to_dir(&buffer, destination.clone());
-            }
-
-            if stats.regular_files == 0 {
-                return Err(CopyFromContainerError::EmptyArchive {
-                    destination: destination.clone(),
-                });
-            }
-
-            write_single_file_from_archive(&buffer, destination)
-        })
-        .await
-        .map_err(CopyFromContainerError::BlockingJoin)?;
-
-        result
-    }
 }
 
 impl CopyToContainerCollection {
@@ -265,96 +239,6 @@ impl CopyDataSource {
 
         Ok(())
     }
-}
-
-#[derive(Debug)]
-struct ArchiveStats {
-    regular_files: usize,
-    directories: usize,
-}
-
-impl ArchiveStats {
-    fn should_extract_as_directory(&self) -> bool {
-        self.directories > 0 || self.regular_files > 1
-    }
-}
-
-fn analyze_archive(data: &[u8]) -> Result<ArchiveStats, CopyFromContainerError> {
-    let mut archive = TarArchive::new(Cursor::new(data));
-    let mut stats = ArchiveStats {
-        regular_files: 0,
-        directories: 0,
-    };
-
-    for entry_result in archive.entries().map_err(io::Error::from)? {
-        let entry = entry_result.map_err(io::Error::from)?;
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_file() || entry_type.is_contiguous() {
-            stats.regular_files += 1;
-        } else if entry_type.is_dir() {
-            stats.directories += 1;
-        }
-    }
-
-    Ok(stats)
-}
-
-fn write_single_file_from_archive(
-    data: &[u8],
-    destination: PathBuf,
-) -> Result<CopyFromOutcome, CopyFromContainerError> {
-    let mut archive = TarArchive::new(Cursor::new(data));
-    let mut file_written = false;
-
-    for entry_result in archive.entries().map_err(io::Error::from)? {
-        let mut entry = entry_result.map_err(io::Error::from)?;
-        let entry_type = entry.header().entry_type();
-
-        if entry_type.is_file() || entry_type.is_contiguous() {
-            if file_written {
-                return Err(CopyFromContainerError::MultipleRegularFiles { destination });
-            }
-
-            if let Some(parent) = destination.parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                }
-            }
-
-            let mut file = std::fs::File::create(&destination)?;
-            std::io::copy(&mut entry, &mut file)?;
-            file_written = true;
-        } else if entry_type.is_dir()
-            || entry_type.is_gnu_longname()
-            || entry_type.is_gnu_longlink()
-            || entry_type.is_pax_global_extensions()
-            || entry_type.is_pax_local_extensions()
-            || entry_type.is_gnu_sparse()
-        {
-            continue;
-        } else {
-            return Err(CopyFromContainerError::UnsupportedEntryType {
-                destination,
-                entry_type,
-            });
-        }
-    }
-
-    if file_written {
-        Ok(CopyFromOutcome::File(destination))
-    } else {
-        Err(CopyFromContainerError::EmptyArchive { destination })
-    }
-}
-
-fn extract_archive_to_dir(
-    data: &[u8],
-    destination: PathBuf,
-) -> Result<CopyFromOutcome, CopyFromContainerError> {
-    let mut archive = TarArchive::new(Cursor::new(data));
-    std::fs::create_dir_all(&destination)?;
-    archive.unpack(&destination).map_err(io::Error::from)?;
-    Ok(CopyFromOutcome::Directory(destination))
 }
 
 async fn append_tar_file(
@@ -483,16 +367,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copyfromarchive_write_to_file_success() {
+    async fn copy_from_stream_write_to_file_success() {
+        use futures::stream;
+        use tokio_util::io::StreamReader;
+
         let data = b"hello world".to_vec();
         let copy_to_container = CopyToContainer::new(data.clone(), "payload.txt");
         let bytes = copy_to_container.tar().await.unwrap();
-        let archive = CopyFromArchive::new(bytes);
+
+        let stream = stream::once(async move { Ok::<bytes::Bytes, io::Error>(bytes) });
+        let reader = StreamReader::new(stream);
 
         let temp_dir = tempdir().unwrap();
         let destination = temp_dir.path().join("out.txt");
 
-        let outcome = archive.write_to_file(&destination).await.unwrap();
+        let outcome = write_single_file_from_tar_reader(reader, destination.clone())
+            .await
+            .unwrap();
         assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
 
         let written = fs::read(&destination).await.unwrap();
@@ -500,47 +391,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copyfromarchive_write_to_file_rejects_multiple_files() {
+    async fn copy_from_stream_rejects_multiple_files() {
+        use futures::stream;
+        use tokio_util::io::StreamReader;
+
         let collection = CopyToContainerCollection::new(vec![
             CopyToContainer::new(vec![1u8], "dir/file1.txt"),
             CopyToContainer::new(vec![2u8], "dir/file2.txt"),
         ]);
         let bytes = collection.tar().await.unwrap();
-        let archive = CopyFromArchive::new(bytes);
+
+        let stream = stream::once(async move { Ok::<bytes::Bytes, io::Error>(bytes) });
+        let reader = StreamReader::new(stream);
 
         let temp_dir = tempdir().unwrap();
         let destination = temp_dir.path().join("out.txt");
 
-        let err = archive.write_to_file(&destination).await.unwrap_err();
+        let err = write_single_file_from_tar_reader(reader, destination.clone())
+            .await
+            .unwrap_err();
         match err {
             CopyFromContainerError::MultipleRegularFiles { destination: dest } => {
                 assert_eq!(dest, destination);
             }
             other => panic!("expected MultipleRegularFiles error, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn copyfromarchive_extract_to_dir_success() {
-        let collection = CopyToContainerCollection::new(vec![
-            CopyToContainer::new(vec![1u8], "root/file1.txt"),
-            CopyToContainer::new(vec![2u8], "root/nested/file2.txt"),
-        ]);
-        let bytes = collection.tar().await.unwrap();
-        let archive = CopyFromArchive::new(bytes);
-
-        let temp_dir = tempdir().unwrap();
-        let destination = temp_dir.path().join("extracted");
-
-        let outcome = archive.extract_to_dir(&destination).await.unwrap();
-        assert!(matches!(outcome, CopyFromOutcome::Directory(ref path) if path == &destination));
-
-        let file1 = fs::read(destination.join("root/file1.txt")).await.unwrap();
-        let file2 = fs::read(destination.join("root/nested/file2.txt"))
-            .await
-            .unwrap();
-
-        assert_eq!(file1, vec![1u8]);
-        assert_eq!(file2, vec![2u8]);
     }
 }
