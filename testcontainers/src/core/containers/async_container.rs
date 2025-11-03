@@ -6,12 +6,7 @@ use tokio_stream::StreamExt;
 use super::host::HostPortExposure;
 use crate::{
     core::{
-        async_drop,
-        client::Client,
-        copy::{CopyFromArchive, CopyFromOutcome},
-        env,
-        error::Result,
-        network::Network,
+        async_drop, client::Client, copy::CopyFromOutcome, env, error::Result, network::Network,
         ContainerState,
     },
     ContainerRequest, Image,
@@ -187,11 +182,6 @@ where
         Ok(exit_code)
     }
 
-    /// Downloads the contents at `container_path` as a TAR archive without writing to disk.
-    pub async fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
-        self.raw.copy_from(container_path).await
-    }
-
     /// Copies a single regular file from the container into a host destination and returns the
     /// resulting [`CopyFromOutcome`].
     pub async fn copy_file_from<P>(
@@ -204,21 +194,6 @@ where
     {
         let destination: PathBuf = destination.as_ref().to_path_buf();
         self.raw.copy_file_from(container_path, destination).await
-    }
-
-    /// Recursively extracts a container directory into the given host destination.
-    pub async fn copy_dir_from<P>(
-        &self,
-        container_path: impl Into<String>,
-        destination: P,
-    ) -> Result<CopyFromOutcome>
-    where
-        P: AsRef<std::path::Path> + Send + 'static,
-    {
-        let destination: PathBuf = destination.as_ref().to_path_buf();
-        self.raw
-            .copy_directory_from(container_path, destination)
-            .await
     }
 
     /// Removes the container.

@@ -40,23 +40,9 @@ assert!(matches!(outcome, CopyFromOutcome::File(path) if path == destination));
 assert_eq!(tokio::fs::read_to_string(&destination).await?, "42\n");
 ```
 
-- `copy_file_from` downloads the requested path and enforces that the archive contains exactly one regular file.
-- `copy_dir_from` extracts the full archive tree into the provided host directory, creating the directory if needed.
+- `copy_file_from` downloads the requested path, enforces that the archive contains exactly one regular file, and streams the archive directly to disk so large files do not need to reside fully in memory.
 
-Both methods also exist on the blocking `Container` type and use the same return enum to report where the data landed.
-
-### Working With The Raw Archive
-
-For advanced workflows you can pull a `CopyFromArchive` and decide how to consume it:
-
-```rust
-let archive = container.copy_from("/tmp/logs").await?;
-let bytes = archive.as_bytes();            // inspect in memory
-let _ = archive.clone().into_bytes();      // take ownership
-let _ = archive.extract(&logs_dir).await?; // smart helper: file vs directory
-```
-
-`CopyFromArchive::extract` inspects the TAR stream—if it contains multiple files or directories it unpacks into the destination directory; otherwise it writes a single file. Opt for the explicit `write_to_file` or `extract_to_dir` helpers when you need predictable behavior.
+The blocking `Container` type offers the same helper and return enum. If you need to materialize entire directories, run `tar` inside the container first, then pull the resulting archive with `copy_file_from`.
 
 ## Mounts For Writable Workspaces
 

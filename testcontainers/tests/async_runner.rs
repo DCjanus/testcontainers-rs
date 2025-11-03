@@ -322,28 +322,31 @@ async fn async_copy_file_from_container() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn async_copy_directory_from_container() -> anyhow::Result<()> {
+async fn async_copy_large_file_from_container() -> anyhow::Result<()> {
     let source_dir = tempfile::tempdir()?;
-    let nested = source_dir.path().join("nested");
-    std::fs::create_dir_all(&nested)?;
-    std::fs::write(nested.join("data.txt"), b"from directory")?;
+    let large_path = source_dir.path().join("large.bin");
+    let content = vec![0xAB; 4 * 1024 * 1024];
+    std::fs::write(&large_path, &content)?;
 
     let container = GenericImage::new("alpine", "latest")
         .with_wait_for(WaitFor::seconds(2))
-        .with_copy_to("/opt/data", source_dir.path())
+        .with_copy_to("/opt/large.bin", &large_path)
         .with_cmd(vec!["sleep", "60"])
         .start()
         .await?;
 
-    let destination_root = tempfile::tempdir()?;
-    let destination = destination_root.path().join("extracted");
+    let destination_dir = tempfile::tempdir()?;
+    let destination = destination_dir.path().join("downloaded.bin");
 
-    let outcome = container.copy_dir_from("/opt/data", &destination).await?;
+    let outcome = container
+        .copy_file_from("/opt/large.bin", &destination)
+        .await?;
 
-    assert!(matches!(outcome, CopyFromOutcome::Directory(ref path) if path == &destination));
+    assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
 
-    let copied = fs::read(destination.join("opt/data/nested/data.txt")).await?;
-    assert_eq!(copied, b"from directory");
+    let copied = fs::read(&destination).await?;
+    assert_eq!(copied.len(), content.len());
+    assert_eq!(copied, content);
 
     container.stop().await?;
     Ok(())

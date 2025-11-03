@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self},
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
 };
@@ -25,17 +26,17 @@ use bollard::{
     },
     Docker,
 };
-use bytes::BytesMut;
 use ferroid::{base32::Base32UlidExt, id::ULID};
 use futures::{StreamExt, TryStreamExt};
 use tokio::sync::{Mutex, OnceCell};
+use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::core::{
     client::exec::ExecResult,
     copy::{
-        CopyFromArchive, CopyFromContainerError, CopyToContainer, CopyToContainerCollection,
-        CopyToContainerError,
+        write_single_file_from_tar_reader, CopyFromContainerError, CopyFromOutcome,
+        CopyToContainer, CopyToContainerCollection, CopyToContainerError,
     },
     env::{self, ConfigurationError},
     logs::{
@@ -413,28 +414,28 @@ impl Client {
             .map_err(ClientError::UploadToContainerError)
     }
 
-    pub(crate) async fn copy_from_container(
+    pub(crate) async fn copy_file_from_container(
         &self,
         container_id: impl AsRef<str>,
         container_path: impl AsRef<str>,
-    ) -> Result<CopyFromArchive, ClientError> {
+        destination: PathBuf,
+    ) -> Result<CopyFromOutcome, ClientError> {
         let container_id = container_id.as_ref();
         let container_path = container_path.as_ref().to_owned();
         let options = DownloadFromContainerOptionsBuilder::new()
             .path(&container_path)
             .build();
 
-        let buffer = self
+        let stream = self
             .bollard
             .download_from_container(container_id, Some(options))
-            .try_fold(BytesMut::new(), |mut acc, chunk| async move {
-                acc.extend_from_slice(&chunk);
-                Ok(acc)
-            })
-            .await
-            .map_err(ClientError::DownloadFromContainerError)?;
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err));
 
-        Ok(CopyFromArchive::new(buffer.freeze()))
+        let reader = StreamReader::new(stream);
+
+        write_single_file_from_tar_reader(reader, destination)
+            .await
+            .map_err(ClientError::CopyFromContainerError)
     }
 
     pub(crate) async fn container_is_running(

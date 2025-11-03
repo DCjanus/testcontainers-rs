@@ -5,8 +5,7 @@ use tokio::io::{AsyncBufRead, AsyncReadExt};
 use super::{exec, Client};
 use crate::{
     core::{
-        client::ClientError,
-        copy::{CopyFromArchive, CopyFromOutcome},
+        copy::CopyFromOutcome,
         error::{ContainerMissingInfo, ExecError, Result},
         ports::Ports,
         wait::WaitStrategy,
@@ -40,15 +39,6 @@ impl RawContainer {
         self.docker_client.ports(&self.id).await.map_err(Into::into)
     }
 
-    /// Downloads the item located at `container_path` inside the container as a TAR archive.
-    pub async fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
-        let container_path = container_path.into();
-        self.docker_client
-            .copy_from_container(self.id(), &container_path)
-            .await
-            .map_err(TestcontainersError::from)
-    }
-
     /// Writes the contents of `container_path` to a single file on the host, returning the
     /// extracted destination path.
     pub async fn copy_file_from(
@@ -56,27 +46,10 @@ impl RawContainer {
         container_path: impl Into<String>,
         destination: PathBuf,
     ) -> Result<CopyFromOutcome> {
-        let archive = self.copy_from(container_path).await?;
-
-        archive
-            .write_to_file(&destination)
+        let container_path = container_path.into();
+        self.docker_client
+            .copy_file_from_container(self.id(), &container_path, destination)
             .await
-            .map_err(ClientError::CopyFromContainerError)
-            .map_err(TestcontainersError::from)
-    }
-
-    /// Expands a directory from the container into the given host destination directory.
-    pub async fn copy_directory_from(
-        &self,
-        container_path: impl Into<String>,
-        destination: PathBuf,
-    ) -> Result<CopyFromOutcome> {
-        let archive = self.copy_from(container_path).await?;
-
-        archive
-            .extract_to_dir(&destination)
-            .await
-            .map_err(ClientError::CopyFromContainerError)
             .map_err(TestcontainersError::from)
     }
 

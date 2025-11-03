@@ -331,28 +331,29 @@ fn sync_copy_file_from_container() -> anyhow::Result<()> {
 }
 
 #[test]
-fn sync_copy_directory_from_container() -> anyhow::Result<()> {
+fn sync_copy_large_file_from_container() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
     let source_dir = tempfile::tempdir()?;
-    let nested = source_dir.path().join("nested");
-    std::fs::create_dir_all(&nested)?;
-    std::fs::write(nested.join("data.txt"), b"sync dir payload")?;
+    let large_path = source_dir.path().join("large.bin");
+    let content = vec![0xCD; 4 * 1024 * 1024];
+    std::fs::write(&large_path, &content)?;
 
     let container = GenericImage::new("alpine", "latest")
         .with_wait_for(WaitFor::seconds(2))
-        .with_copy_to("/opt/data", source_dir.path())
+        .with_copy_to("/opt/large.bin", &large_path)
         .with_cmd(vec!["sleep", "60"])
         .start()?;
 
-    let destination_root = tempfile::tempdir()?;
-    let destination = destination_root.path().join("extracted");
+    let destination_dir = tempfile::tempdir()?;
+    let destination = destination_dir.path().join("downloaded.bin");
 
-    let outcome = container.copy_dir_from("/opt/data", &destination)?;
-    assert!(matches!(outcome, CopyFromOutcome::Directory(ref path) if path == &destination));
+    let outcome = container.copy_file_from("/opt/large.bin", &destination)?;
+    assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
 
-    let copied = std::fs::read(destination.join("opt/data/nested/data.txt"))?;
-    assert_eq!(copied, b"sync dir payload");
+    let copied = std::fs::read(&destination)?;
+    assert_eq!(copied.len(), content.len());
+    assert_eq!(copied, content);
 
     container.stop()?;
     Ok(())

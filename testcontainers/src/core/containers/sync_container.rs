@@ -1,13 +1,7 @@
 use std::{fmt, io::BufRead, net::IpAddr, path::PathBuf, sync::Arc};
 
 use crate::{
-    core::{
-        copy::{CopyFromArchive, CopyFromOutcome},
-        env,
-        error::Result,
-        ports::Ports,
-        ContainerPort, ExecCommand,
-    },
+    core::{copy::CopyFromOutcome, env, error::Result, ports::Ports, ContainerPort, ExecCommand},
     ContainerAsync, Image,
 };
 
@@ -136,14 +130,6 @@ where
         })
     }
 
-    /// Downloads the contents at `container_path` into a TAR archive without touching the host
-    /// filesystem.
-    pub fn copy_from(&self, container_path: impl Into<String>) -> Result<CopyFromArchive> {
-        let container_path = container_path.into();
-        self.rt()
-            .block_on(self.async_impl().copy_from(container_path))
-    }
-
     /// Copies a single file from the container into the supplied host destination path.
     pub fn copy_file_from(
         &self,
@@ -156,18 +142,6 @@ where
             self.async_impl()
                 .copy_file_from(container_path, destination),
         )
-    }
-
-    /// Extracts a directory tree from the container into the given host destination.
-    pub fn copy_dir_from(
-        &self,
-        container_path: impl Into<String>,
-        destination: impl AsRef<std::path::Path>,
-    ) -> Result<CopyFromOutcome> {
-        let container_path = container_path.into();
-        let destination = destination.as_ref().to_path_buf();
-        self.rt()
-            .block_on(self.async_impl().copy_dir_from(container_path, destination))
     }
 
     /// Stops the container (not the same with `pause`) using the default 10 second timeout.
