@@ -42,7 +42,7 @@ assert_eq!(tokio::fs::read_to_string(&destination).await?, "42\n");
 
 - `copy_file_from` downloads the requested path, enforces that the archive contains exactly one regular file, and streams the archive directly to disk so large files do not need to reside fully in memory.
 
-The blocking `Container` type offers the same helper and return enum. If you need to materialize entire directories, run `tar` inside the container first, then pull the resulting archive with `copy_file_from`.
+The blocking `Container` type offers the same helper and return enum.
 
 ## Mounts For Writable Workspaces
 
