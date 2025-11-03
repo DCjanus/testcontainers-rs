@@ -7,8 +7,8 @@ pub use self::{
     },
     containers::*,
     copy::{
-        CopyDataSource, CopyFromContainerError, CopyFromOutcome, CopyToContainer,
-        CopyToContainerCollection, CopyToContainerError,
+        CopyDataSource, CopyFromContainerError, CopyToContainer, CopyToContainerCollection,
+        CopyToContainerError,
     },
     healthcheck::Healthcheck,
     image::{ContainerState, ExecCommand, Image, ImageExt},

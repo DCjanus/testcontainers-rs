@@ -1,11 +1,10 @@
-use std::{fmt, net::IpAddr, path::PathBuf, pin::Pin, str::FromStr, sync::Arc, time::Duration};
+use std::{fmt, net::IpAddr, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 
 use super::{exec, Client};
 use crate::{
     core::{
-        copy::CopyFromOutcome,
         error::{ContainerMissingInfo, ExecError, Result},
         ports::Ports,
         wait::WaitStrategy,
@@ -39,16 +38,27 @@ impl RawContainer {
         self.docker_client.ports(&self.id).await.map_err(Into::into)
     }
 
-    /// Writes the contents of `container_path` to a single file on the host, returning the
-    /// extracted destination path.
+    /// Writes the contents of `container_path` to a single file on the host.
     pub async fn copy_file_from(
         &self,
         container_path: impl Into<String>,
-        destination: PathBuf,
-    ) -> Result<CopyFromOutcome> {
+        destination: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
         let container_path = container_path.into();
         self.docker_client
             .copy_file_from_container(self.id(), &container_path, destination)
+            .await
+            .map_err(TestcontainersError::from)
+    }
+
+    /// Reads the contents of `container_path` into memory.
+    pub async fn copy_file_from_to_bytes(
+        &self,
+        container_path: impl Into<String>,
+    ) -> Result<Vec<u8>> {
+        let container_path = container_path.into();
+        self.docker_client
+            .copy_file_from_container_to_bytes(self.id(), &container_path)
             .await
             .map_err(TestcontainersError::from)
     }

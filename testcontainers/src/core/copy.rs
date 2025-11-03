@@ -1,11 +1,13 @@
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use tokio::{
     fs,
-    io::{self as tokio_io, AsyncRead, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
 };
 use tokio_stream::StreamExt;
 use tokio_tar::{Archive as AsyncTarArchive, EntryType};
@@ -25,58 +27,93 @@ pub enum CopyDataSource {
     Data(Vec<u8>),
 }
 
-/// Outcome of extracting data that was copied from a container.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CopyFromOutcome {
-    /// A single file was extracted to the provided host path.
-    File(PathBuf),
-    /// A directory tree was unpacked into the provided host path.
-    Directory(PathBuf),
-}
-
-impl CopyFromOutcome {
-    /// Returns a borrowed view of the path that received the copied contents.
-    pub fn path(&self) -> &Path {
-        match self {
-            CopyFromOutcome::File(path) | CopyFromOutcome::Directory(path) => path.as_path(),
-        }
-    }
-
-    /// Consumes the outcome and yields the owned destination path.
-    pub fn into_path(self) -> PathBuf {
-        match self {
-            CopyFromOutcome::File(path) | CopyFromOutcome::Directory(path) => path,
-        }
-    }
-}
-
 /// Errors that can occur while materializing data copied from a container.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyFromContainerError {
     #[error("io failed with error: {0}")]
     Io(#[from] io::Error),
     #[error("archive did not contain any regular files; cannot write to {destination}")]
-    EmptyArchive { destination: PathBuf },
-    #[error("archive contains multiple regular files; cannot write to single-file destination {destination}")]
-    MultipleRegularFiles { destination: PathBuf },
-    #[error("archive entry type '{entry_type:?}' is not supported for single-file destination {destination}")]
+    EmptyArchive { destination: String },
+    #[error("requested container path '{container_path}' is a directory")]
+    ContainerPathIsDirectory { container_path: String },
+    #[error(
+        "requested container path '{container_path}' resolved to unexpected archive entry '{resolved_path:?}'"
+    )]
+    ContainerPathMismatch {
+        container_path: String,
+        resolved_path: PathBuf,
+    },
+    #[error("archive entry type '{entry_type:?}' is not supported for destination {destination}")]
     UnsupportedEntryType {
-        destination: PathBuf,
+        destination: String,
         entry_type: EntryType,
     },
 }
 
-/// Stream the tar payload coming from the container and persist the single regular file
-/// exposed by our `copy_file_from` API. We iterate entry-by-entry to support large files
-/// without buffering the entire archive in memory and refuse archives that contain more
-/// than one regular file.
-pub(crate) async fn write_single_file_from_tar_reader<R>(
+/// Extracts exactly one regular file from the tar payload coming from the container and
+/// writes it to the provided destination path on the host filesystem.
+pub(crate) async fn copy_single_file_from_tar_to_path<R>(
     reader: R,
-    destination: PathBuf,
-) -> Result<CopyFromOutcome, CopyFromContainerError>
+    destination_path: impl AsRef<Path>,
+    container_path: impl AsRef<str>,
+) -> Result<(), CopyFromContainerError>
 where
     R: AsyncRead + Unpin,
 {
+    let destination_path = destination_path.as_ref();
+    if let Some(parent) = destination_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(CopyFromContainerError::Io)?;
+        }
+    }
+
+    let destination_label = destination_path.display().to_string();
+
+    let mut file = fs::File::create(destination_path)
+        .await
+        .map_err(CopyFromContainerError::Io)?;
+
+    write_single_file_from_tar(
+        reader,
+        container_path.as_ref(),
+        &destination_label,
+        &mut file,
+    )
+    .await?;
+
+    file.flush().await.map_err(CopyFromContainerError::Io)
+}
+
+/// Extracts exactly one regular file from the tar payload coming from the container and
+/// returns its contents as a byte vector.
+pub(crate) async fn copy_single_file_from_tar_to_bytes<R>(
+    reader: R,
+    container_path: impl AsRef<str>,
+) -> Result<Vec<u8>, CopyFromContainerError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut writer = VecAsyncWriter::default();
+
+    write_single_file_from_tar(reader, container_path.as_ref(), "<memory>", &mut writer).await?;
+
+    Ok(writer.into_inner())
+}
+
+async fn write_single_file_from_tar<R, W>(
+    reader: R,
+    container_path: &str,
+    destination_label: &str,
+    writer: &mut W,
+) -> Result<(), CopyFromContainerError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    let container_path = container_path.as_ref();
+    let normalized_container_path = normalize_container_path(container_path);
     let mut archive = AsyncTarArchive::new(reader);
     let mut entries = archive.entries().map_err(CopyFromContainerError::Io)?;
     let mut file_written = false;
@@ -86,29 +123,23 @@ where
         let entry_type = entry.header().entry_type();
 
         if entry_type.is_file() || entry_type.is_contiguous() {
-            if file_written {
-                return Err(CopyFromContainerError::MultipleRegularFiles {
-                    destination: destination.clone(),
+            let entry_path = entry.path()?;
+            let normalized_entry_path = normalize_archive_entry_path(entry_path.as_ref());
+
+            if normalized_entry_path != normalized_container_path {
+                return Err(CopyFromContainerError::ContainerPathMismatch {
+                    container_path: container_path.to_owned(),
+                    resolved_path: entry_path.into_owned(),
                 });
             }
 
-            // We lazily create the destination parent to avoid assuming the caller prepared
-            // the filesystem ahead of time, but only when it is meaningful (non-empty path).
-            if let Some(parent) = destination.parent() {
-                if !parent.as_os_str().is_empty() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .map_err(CopyFromContainerError::Io)?;
-                }
+            if file_written {
+                continue;
             }
 
-            let mut file = fs::File::create(&destination)
+            tokio::io::copy(&mut entry, writer)
                 .await
                 .map_err(CopyFromContainerError::Io)?;
-            tokio_io::copy(&mut entry, &mut file)
-                .await
-                .map_err(CopyFromContainerError::Io)?;
-            file.flush().await.map_err(CopyFromContainerError::Io)?;
 
             file_written = true;
         } else if entry_type.is_dir()
@@ -118,20 +149,86 @@ where
             || entry_type.is_pax_local_extensions()
             || entry_type.is_gnu_sparse()
         {
+            if entry_type.is_dir() {
+                let entry_path = entry.path()?;
+                let normalized_entry_path = normalize_archive_entry_path(entry_path.as_ref());
+
+                if normalized_entry_path == normalized_container_path {
+                    return Err(CopyFromContainerError::ContainerPathIsDirectory {
+                        container_path: container_path.to_owned(),
+                    });
+                }
+            }
+
             continue;
         } else {
             return Err(CopyFromContainerError::UnsupportedEntryType {
-                destination,
+                destination: destination_label.to_string(),
                 entry_type,
             });
         }
     }
 
     if file_written {
-        Ok(CopyFromOutcome::File(destination))
+        writer.flush().await.map_err(CopyFromContainerError::Io)
     } else {
-        Err(CopyFromContainerError::EmptyArchive { destination })
+        Err(CopyFromContainerError::EmptyArchive {
+            destination: destination_label.to_string(),
+        })
     }
+}
+
+#[derive(Default)]
+struct VecAsyncWriter {
+    buffer: Vec<u8>,
+}
+
+impl VecAsyncWriter {
+    fn into_inner(self) -> Vec<u8> {
+        self.buffer
+    }
+}
+
+impl AsyncWrite for VecAsyncWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        self.buffer.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+fn normalize_container_path(path: &str) -> PathBuf {
+    normalize_components(Path::new(path))
+}
+
+fn normalize_archive_entry_path(path: &Path) -> PathBuf {
+    normalize_components(path)
+}
+
+fn normalize_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => normalized.push(".."),
+            Component::Prefix(prefix_component) => normalized.push(prefix_component.as_os_str()),
+        }
+    }
+
+    normalized
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -199,6 +296,11 @@ impl CopyToContainer {
 impl From<&Path> for CopyDataSource {
     fn from(value: &Path) -> Self {
         CopyDataSource::File(value.to_path_buf())
+    }
+}
+impl From<&PathBuf> for CopyDataSource {
+    fn from(value: &PathBuf) -> Self {
+        CopyDataSource::File(value.clone())
     }
 }
 impl From<PathBuf> for CopyDataSource {
@@ -375,19 +477,35 @@ mod tests {
         let copy_to_container = CopyToContainer::new(data.clone(), "payload.txt");
         let bytes = copy_to_container.tar().await.unwrap();
 
-        let stream = stream::once(async move { Ok::<bytes::Bytes, io::Error>(bytes) });
+        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes)]);
         let reader = StreamReader::new(stream);
 
         let temp_dir = tempdir().unwrap();
-        let destination = temp_dir.path().join("out.txt");
-
-        let outcome = write_single_file_from_tar_reader(reader, destination.clone())
+        let destination_path = temp_dir.path().join("out.txt");
+        copy_single_file_from_tar_to_path(reader, &destination_path, "payload.txt")
             .await
             .unwrap();
-        assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
 
-        let written = fs::read(&destination).await.unwrap();
+        let written = fs::read(&destination_path).await.unwrap();
         assert_eq!(written, data);
+    }
+
+    #[tokio::test]
+    async fn copy_from_stream_write_to_memory_success() {
+        use futures::stream;
+        use tokio_util::io::StreamReader;
+
+        let data = b"hello world".to_vec();
+        let copy_to_container = CopyToContainer::new(data.clone(), "payload.txt");
+        let bytes = copy_to_container.tar().await.unwrap();
+
+        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes)]);
+        let reader = StreamReader::new(stream);
+
+        let buffer = copy_single_file_from_tar_to_bytes(reader, "payload.txt")
+            .await
+            .unwrap();
+        assert_eq!(buffer, data);
     }
 
     #[tokio::test]
@@ -401,20 +519,57 @@ mod tests {
         ]);
         let bytes = collection.tar().await.unwrap();
 
-        let stream = stream::once(async move { Ok::<bytes::Bytes, io::Error>(bytes) });
+        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes)]);
         let reader = StreamReader::new(stream);
 
         let temp_dir = tempdir().unwrap();
-        let destination = temp_dir.path().join("out.txt");
-
-        let err = write_single_file_from_tar_reader(reader, destination.clone())
+        let destination_path = temp_dir.path().join("out.txt");
+        let err = copy_single_file_from_tar_to_path(reader, &destination_path, "dir/file1.txt")
             .await
             .unwrap_err();
         match err {
-            CopyFromContainerError::MultipleRegularFiles { destination: dest } => {
-                assert_eq!(dest, destination);
+            CopyFromContainerError::ContainerPathMismatch {
+                container_path,
+                resolved_path,
+            } => {
+                assert_eq!(container_path, "dir/file1.txt");
+                assert_eq!(resolved_path, PathBuf::from("dir/file2.txt"));
             }
-            other => panic!("expected MultipleRegularFiles error, got {other:?}"),
+            other => panic!("expected ContainerPathMismatch error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_from_stream_rejects_directory_target() {
+        use futures::stream;
+        use tokio_util::io::StreamReader;
+
+        let temp_dir = tempdir().unwrap();
+        let dir_path = temp_dir.path().join("dir");
+        fs::create_dir(&dir_path).await.unwrap();
+        let file_path = dir_path.join("file.txt");
+        fs::write(&file_path, b"data").await.unwrap();
+
+        let mut builder = tokio_tar::Builder::new(Vec::new());
+        builder.append_dir_all("dir", &dir_path).await.unwrap();
+        let bytes = builder.into_inner().await.unwrap();
+
+        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes::Bytes::from(
+            bytes,
+        ))]);
+        let reader = StreamReader::new(stream);
+
+        let destination_path = temp_dir.path().join("out.txt");
+
+        let err = copy_single_file_from_tar_to_path(reader, &destination_path, "/dir")
+            .await
+            .unwrap_err();
+
+        match err {
+            CopyFromContainerError::ContainerPathIsDirectory { container_path } => {
+                assert_eq!(container_path, "/dir");
+            }
+            other => panic!("expected ContainerPathIsDirectory error, got {other:?}"),
         }
     }
 }

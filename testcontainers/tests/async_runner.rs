@@ -11,7 +11,7 @@ use testcontainers::{
         BuildImageOptions, CmdWaitFor, ExecCommand, WaitFor,
     },
     runners::{AsyncBuilder, AsyncRunner},
-    CopyFromOutcome, GenericBuildableImage, GenericImage, Image, ImageExt,
+    GenericBuildableImage, GenericImage, Image, ImageExt,
 };
 use tokio::{fs, io::AsyncReadExt};
 
@@ -308,14 +308,17 @@ async fn async_copy_file_from_container() -> anyhow::Result<()> {
     let destination_dir = tempfile::tempdir()?;
     let destination = destination_dir.path().join("copied.txt");
 
-    let outcome = container
+    container
         .copy_file_from("/tmp/original.txt", &destination)
         .await?;
 
-    assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
-
     let copied = fs::read(&destination).await?;
     assert_eq!(copied, b"container payload");
+
+    let memory = container
+        .copy_file_from_to_bytes("/tmp/original.txt")
+        .await?;
+    assert_eq!(memory, b"container payload");
 
     container.stop().await?;
     Ok(())
@@ -338,11 +341,9 @@ async fn async_copy_large_file_from_container() -> anyhow::Result<()> {
     let destination_dir = tempfile::tempdir()?;
     let destination = destination_dir.path().join("downloaded.bin");
 
-    let outcome = container
+    container
         .copy_file_from("/opt/large.bin", &destination)
         .await?;
-
-    assert!(matches!(outcome, CopyFromOutcome::File(ref path) if path == &destination));
 
     let copied = fs::read(&destination).await?;
     assert_eq!(copied.len(), content.len());

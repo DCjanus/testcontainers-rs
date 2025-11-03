@@ -1,7 +1,7 @@
-use std::{fmt, io::BufRead, net::IpAddr, path::PathBuf, sync::Arc};
+use std::{fmt, io::BufRead, net::IpAddr, sync::Arc};
 
 use crate::{
-    core::{copy::CopyFromOutcome, env, error::Result, ports::Ports, ContainerPort, ExecCommand},
+    core::{env, error::Result, ports::Ports, ContainerPort, ExecCommand},
     ContainerAsync, Image,
 };
 
@@ -130,18 +130,29 @@ where
         })
     }
 
-    /// Copies a single file from the container into the supplied host destination path.
+    /// Copies a single file from the container into the supplied destination path.
+    ///
+    /// # Behavior
+    /// - Regular files are streamed directly into `destination` on disk.
+    /// - If `container_path` resolves to a directory, an error is returned and no data is written.
+    /// - Symlink handling follows Docker's `GET /containers/{id}/archive` endpoint behavior without extra processing.
     pub fn copy_file_from(
         &self,
         container_path: impl Into<String>,
         destination: impl AsRef<std::path::Path>,
-    ) -> Result<CopyFromOutcome> {
+    ) -> Result<()> {
         let container_path = container_path.into();
-        let destination = destination.as_ref().to_path_buf();
         self.rt().block_on(
             self.async_impl()
                 .copy_file_from(container_path, destination),
         )
+    }
+
+    /// Copies a single file from the container and returns its bytes.
+    pub fn copy_file_from_to_bytes(&self, container_path: impl Into<String>) -> Result<Vec<u8>> {
+        let container_path = container_path.into();
+        self.rt()
+            .block_on(self.async_impl().copy_file_from_to_bytes(container_path))
     }
 
     /// Stops the container (not the same with `pause`) using the default 10 second timeout.

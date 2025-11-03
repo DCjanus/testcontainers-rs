@@ -24,7 +24,7 @@ Use `copy_file_from` to pull data produced inside the container:
 
 ```rust
 use tempfile::tempdir;
-use testcontainers::{CopyFromOutcome, GenericImage, WaitFor};
+use testcontainers::{GenericImage, WaitFor};
 
 let container = GenericImage::new("alpine", "latest")
     .with_cmd(["sh", "-c", "echo '42' > /tmp/result.txt && sleep 30"])
@@ -33,16 +33,17 @@ let container = GenericImage::new("alpine", "latest")
     .await?;
 
 let destination = tempdir()?.path().join("result.txt");
-let outcome = container
+container
     .copy_file_from("/tmp/result.txt", &destination)
     .await?;
-assert!(matches!(outcome, CopyFromOutcome::File(path) if path == destination));
 assert_eq!(tokio::fs::read_to_string(&destination).await?, "42\n");
 ```
 
-- `copy_file_from` downloads the requested path, enforces that the archive contains exactly one regular file, and streams the archive directly to disk so large files do not need to reside fully in memory.
+- `copy_file_from` downloads the requested path, validates that the archive resolves to that regular file, and writes the payload directly to the supplied host path.
+- Call `copy_file_from_to_bytes` when you prefer to capture the file contents in-memory: `let bytes = container.copy_file_from_to_bytes("/tmp/result.txt").await?;`.
+- Both helpers apply the same validation semantics, returning an error when the container path resolves to a directory or the archive contains unexpected entries.
 
-The blocking `Container` type offers the same helper and return enum.
+The blocking `Container` type offers the same pair of helpers.
 
 ## Mounts For Writable Workspaces
 
