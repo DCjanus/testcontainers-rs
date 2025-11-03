@@ -20,7 +20,7 @@ Everything is packed into a TAR archive, so nested directories are preserved. Th
 
 ## Copying Files From Running Containers
 
-Two new helpers expose data produced inside the container:
+Use `copy_file_from` to pull data produced inside the container:
 
 ```rust
 use tempfile::tempdir;
