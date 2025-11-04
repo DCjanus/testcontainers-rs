@@ -21,16 +21,20 @@ use bollard::{
     Docker,
 };
 use ferroid::{base32::Base32UlidExt, id::ULID};
-use futures::{StreamExt, TryStreamExt};
-use tokio::sync::{Mutex, OnceCell};
+use futures::{pin_mut, StreamExt, TryStreamExt};
+use tokio::{
+    io::AsyncRead,
+    sync::{Mutex, OnceCell},
+};
+use tokio_tar::{Archive as AsyncTarArchive, EntryType};
 use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::core::{
     client::exec::ExecResult,
     copy::{
-        copy_single_file_from_tar_into, CopyFileFromContainer, CopyFromContainerError,
-        CopyToContainer, CopyToContainerCollection, CopyToContainerError,
+        CopyFileFromContainer, CopyFromContainerError, CopyToContainer, CopyToContainerCollection,
+        CopyToContainerError,
     },
     env::{self, ConfigurationError},
     logs::{
@@ -418,21 +422,59 @@ impl Client {
         T: CopyFileFromContainer,
     {
         let container_id = container_id.as_ref();
-        let container_path = container_path.as_ref().to_owned();
         let options = DownloadFromContainerOptionsBuilder::new()
-            .path(&container_path)
+            .path(container_path.as_ref())
             .build();
 
         let stream = self
             .bollard
             .download_from_container(container_id, Some(options))
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err));
-
         let reader = StreamReader::new(stream);
-
-        copy_single_file_from_tar_into(reader, &container_path, target)
+        Self::extract_file_entry(reader, target)
             .await
             .map_err(ClientError::CopyFromContainerError)
+    }
+
+    async fn extract_file_entry<R, T>(
+        reader: R,
+        target: T,
+    ) -> Result<T::Output, CopyFromContainerError>
+    where
+        R: AsyncRead + Unpin,
+        T: CopyFileFromContainer,
+    {
+        let mut archive = AsyncTarArchive::new(reader);
+        let entries = archive.entries().map_err(CopyFromContainerError::Io)?;
+
+        let files =
+            entries
+                .map_err(CopyFromContainerError::Io)
+                .try_filter_map(move |entry| async move {
+                    match entry.header().entry_type() {
+                        EntryType::GNULongName
+                        | EntryType::GNULongLink
+                        | EntryType::XGlobalHeader
+                        | EntryType::XHeader
+                        | EntryType::GNUSparse => Ok(None), // skip metadata entries
+                        EntryType::Directory => Err(CopyFromContainerError::IsDirectory),
+                        EntryType::Regular | EntryType::Continuous => return Ok(Some(entry)),
+                        et @ _ => Err(CopyFromContainerError::UnsupportedEntry(et)),
+                    }
+                });
+
+        pin_mut!(files);
+
+        let first_file = files
+            .try_next()
+            .await?
+            .ok_or(CopyFromContainerError::EmptyArchive)?;
+
+        if files.try_next().await?.is_some() {
+            return Err(CopyFromContainerError::MultipleFilesInArchive);
+        }
+
+        target.copy_from_reader(first_file).await
     }
 
     pub(crate) async fn container_is_running(

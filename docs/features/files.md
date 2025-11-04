@@ -39,9 +39,9 @@ container
 assert_eq!(tokio::fs::read_to_string(&destination).await?, "42\n");
 ```
 
-- `copy_file_from` downloads the requested path, validates that the archive resolves to that regular file, and materializes it into any target that implements `CopyFileFromContainer` (e.g. `PathBuf`, `Vec<u8>`, `&mut Vec<u8>`).
+- `copy_file_from` streams the sole regular-file entry produced by Docker into any destination implementing `CopyFileFromContainer` (e.g. `PathBuf`, `Vec<u8>`, `&mut Vec<u8>`); it now verifies that exactly one file exists and errors when the path resolves to a directory or an unsupported TAR record.
 - Capture the payload in-memory with `let bytes: Vec<u8> = container.copy_file_from("/tmp/result.txt", Vec::new()).await?;`.
-- The helper applies strict validation semantics, returning an error when the container path resolves to a directory or the archive contains unexpected entries.
+- The helper trusts Docker to emit the requested payload, so it only errors early when the entry resolves to a directory or an unsupported TAR record, keeping the happy path lean.
 
 The blocking `Container` type offers the same `copy_file_from` API.
 

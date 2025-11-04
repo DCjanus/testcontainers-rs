@@ -6,13 +6,8 @@ use tokio_stream::StreamExt;
 use super::host::HostPortExposure;
 use crate::{
     core::{
-        async_drop,
-        client::Client,
-        copy::CopyFileFromContainer,
-        env,
-        error::Result,
-        network::Network,
-        ContainerState,
+        async_drop, client::Client, copy::CopyFileFromContainer, env, error::Result,
+        network::Network, ContainerState,
     },
     ContainerRequest, Image,
 };

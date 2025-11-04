@@ -91,10 +91,7 @@ pub use crate::core::Container;
 pub use crate::core::ReuseDirective;
 pub use crate::core::{
     copy::{
-        CopyDataSource,
-        CopyFileFromContainer,
-        CopyFromContainerError,
-        CopyToContainer,
+        CopyDataSource, CopyFileFromContainer, CopyFromContainerError, CopyToContainer,
         CopyToContainerError,
     },
     error::TestcontainersError,

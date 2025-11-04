@@ -2,12 +2,7 @@ use std::{fmt, io::BufRead, net::IpAddr, sync::Arc};
 
 use crate::{
     core::{
-        copy::CopyFileFromContainer,
-        env,
-        error::Result,
-        ports::Ports,
-        ContainerPort,
-        ExecCommand,
+        copy::CopyFileFromContainer, env, error::Result, ports::Ports, ContainerPort, ExecCommand,
     },
     ContainerAsync, Image,
 };

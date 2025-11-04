@@ -1,6 +1,6 @@
 use std::{
     io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use async_trait::async_trait;
@@ -8,8 +8,7 @@ use tokio::{
     fs,
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
-use tokio_stream::StreamExt;
-use tokio_tar::{Archive as AsyncTarArchive, EntryType};
+use tokio_tar::EntryType;
 
 #[derive(Debug, Clone)]
 pub struct CopyToContainerCollection(Vec<CopyToContainer>);
@@ -33,19 +32,12 @@ pub enum CopyFromContainerError {
     Io(#[from] io::Error),
     #[error("archive did not contain any regular files")]
     EmptyArchive,
-    #[error("requested container path '{container_path}' is a directory")]
-    ContainerPathIsDirectory { container_path: String },
-    #[error(
-        "requested container path '{container_path}' resolved to unexpected archive entry '{resolved_path:?}'"
-    )]
-    ContainerPathMismatch {
-        container_path: String,
-        resolved_path: PathBuf,
-    },
-    #[error("archive entry type '{entry_type:?}' is not supported for requested target")]
-    UnsupportedEntryType {
-        entry_type: EntryType,
-    },
+    #[error("archive contained multiple files, but only one was expected")]
+    MultipleFilesInArchive,
+    #[error("requested container path is a directory")]
+    IsDirectory,
+    #[error("archive entry type '{0:?}' is not supported for requested target")]
+    UnsupportedEntry(EntryType),
 }
 
 #[async_trait(?Send)]
@@ -127,91 +119,6 @@ impl CopyFileFromContainer for PathBuf {
 
         Ok(self)
     }
-}
-
-pub(crate) async fn copy_single_file_from_tar_into<R, T>(
-    reader: R,
-    container_path: impl AsRef<str>,
-    target: T,
-) -> Result<T::Output, CopyFromContainerError>
-where
-    R: AsyncRead + Unpin,
-    T: CopyFileFromContainer,
-{
-    let container_path = container_path.as_ref();
-    let normalized_container_path = normalize_container_path(container_path);
-    let mut archive = AsyncTarArchive::new(reader);
-    let mut entries = archive.entries().map_err(CopyFromContainerError::Io)?;
-    let mut maybe_target = Some(target);
-
-    while let Some(entry_result) = entries.next().await {
-        let entry = entry_result.map_err(CopyFromContainerError::Io)?;
-        let entry_type = entry.header().entry_type();
-
-        if entry_type.is_file() || entry_type.is_contiguous() {
-            let entry_path = entry.path()?;
-            let normalized_entry_path = normalize_archive_entry_path(entry_path.as_ref());
-
-            if normalized_entry_path != normalized_container_path {
-                return Err(CopyFromContainerError::ContainerPathMismatch {
-                    container_path: container_path.to_owned(),
-                    resolved_path: entry_path.into_owned(),
-                });
-            }
-
-            let target = maybe_target
-                .take()
-                .expect("CopyFileFromContainer target unexpectedly consumed");
-
-            return target.copy_from_reader(entry).await;
-        } else if entry_type.is_dir()
-            || entry_type.is_gnu_longname()
-            || entry_type.is_gnu_longlink()
-            || entry_type.is_pax_global_extensions()
-            || entry_type.is_pax_local_extensions()
-            || entry_type.is_gnu_sparse()
-        {
-            if entry_type.is_dir() {
-                let entry_path = entry.path()?;
-                let normalized_entry_path = normalize_archive_entry_path(entry_path.as_ref());
-
-                if normalized_entry_path == normalized_container_path {
-                    return Err(CopyFromContainerError::ContainerPathIsDirectory {
-                        container_path: container_path.to_owned(),
-                    });
-                }
-            }
-
-            continue;
-        } else {
-            return Err(CopyFromContainerError::UnsupportedEntryType { entry_type });
-        }
-    }
-
-    Err(CopyFromContainerError::EmptyArchive)
-}
-
-fn normalize_container_path(path: &str) -> PathBuf {
-    normalize_components(Path::new(path))
-}
-
-fn normalize_archive_entry_path(path: &Path) -> PathBuf {
-    normalize_components(path)
-}
-
-fn normalize_components(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::Normal(part) => normalized.push(part),
-            Component::ParentDir => normalized.push(".."),
-            Component::Prefix(prefix_component) => normalized.push(prefix_component.as_os_str()),
-        }
-    }
-
-    normalized
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -449,5 +356,4 @@ mod tests {
         let bytes = result.unwrap();
         assert!(!bytes.is_empty());
     }
-
 }
