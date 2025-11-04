@@ -205,11 +205,7 @@ impl From<&Path> for CopyDataSource {
         CopyDataSource::File(value.to_path_buf())
     }
 }
-impl From<&PathBuf> for CopyDataSource {
-    fn from(value: &PathBuf) -> Self {
-        CopyDataSource::File(value.clone())
-    }
-}
+
 impl From<PathBuf> for CopyDataSource {
     fn from(value: PathBuf) -> Self {
         CopyDataSource::File(value)
