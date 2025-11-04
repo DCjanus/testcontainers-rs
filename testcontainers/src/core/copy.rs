@@ -98,7 +98,19 @@ impl<'a> CopyFileFromContainer for &'a mut Vec<u8> {
 
 #[async_trait(?Send)]
 impl CopyFileFromContainer for PathBuf {
-    type Output = PathBuf;
+    type Output = ();
+
+    async fn copy_from_reader<R>(self, reader: R) -> Result<Self::Output, CopyFromContainerError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.as_path().copy_from_reader(reader).await
+    }
+}
+
+#[async_trait(?Send)]
+impl CopyFileFromContainer for &Path {
+    type Output = ();
 
     async fn copy_from_reader<R>(
         self,
@@ -109,13 +121,13 @@ impl CopyFileFromContainer for PathBuf {
     {
         if let Some(parent) = self.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
+                tokio::fs::create_dir_all(parent)
                     .await
                     .map_err(CopyFromContainerError::Io)?;
             }
         }
 
-        let mut file = fs::File::create(&self)
+        let mut file = fs::File::create(self)
             .await
             .map_err(CopyFromContainerError::Io)?;
 
@@ -124,8 +136,7 @@ impl CopyFileFromContainer for PathBuf {
             .map_err(CopyFromContainerError::Io)?;
 
         file.flush().await.map_err(CopyFromContainerError::Io)?;
-
-        Ok(self)
+        Ok(())
     }
 }
 
