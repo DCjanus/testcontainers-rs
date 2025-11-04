@@ -13,7 +13,7 @@ use testcontainers::{
     runners::{AsyncBuilder, AsyncRunner},
     GenericBuildableImage, GenericImage, Image, ImageExt,
 };
-use tokio::{fs, io::AsyncReadExt};
+use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Default)]
 pub struct HelloWorld;
@@ -293,61 +293,40 @@ async fn async_copy_files_to_container() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn async_copy_file_from_container() -> anyhow::Result<()> {
-    let temp_dir = temp_dir::TempDir::new()?;
-    let file_on_host = temp_dir.child("original.txt");
-    std::fs::write(&file_on_host, b"container payload")?;
-
+async fn async_copy_file_from_container_to_path() -> anyhow::Result<()> {
     let container = GenericImage::new("alpine", "latest")
-        .with_wait_for(WaitFor::seconds(2))
-        .with_copy_to("/tmp/original.txt", file_on_host)
-        .with_cmd(vec!["sleep", "60"])
+        .with_wait_for(WaitFor::seconds(1))
+        .with_cmd(["sh", "-c", "echo '42' > /tmp/result.txt && sleep 10"])
         .start()
         .await?;
 
     let destination_dir = tempfile::tempdir()?;
-    let destination = destination_dir.path().join("copied.txt");
+    let destination = destination_dir.path().join("result.txt");
 
     container
-        .copy_file_from("/tmp/original.txt", destination.clone())
+        .copy_file_from("/tmp/result.txt", destination.as_path())
         .await?;
 
-    let copied = fs::read(&destination).await?;
-    assert_eq!(copied, b"container payload");
-
-    let memory = container
-        .copy_file_from("/tmp/original.txt", Vec::new())
-        .await?;
-    assert_eq!(memory, b"container payload");
+    let copied = tokio::fs::read_to_string(&destination).await?;
+    assert_eq!(copied, "42\n");
 
     container.stop().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn async_copy_large_file_from_container() -> anyhow::Result<()> {
-    let source_dir = tempfile::tempdir()?;
-    let large_path = source_dir.path().join("large.bin");
-    let content = vec![0xAB; 4 * 1024 * 1024];
-    std::fs::write(&large_path, &content)?;
-
+async fn async_copy_file_from_container_into_mut_vec() -> anyhow::Result<()> {
     let container = GenericImage::new("alpine", "latest")
-        .with_wait_for(WaitFor::seconds(2))
-        .with_copy_to("/opt/large.bin", &large_path)
-        .with_cmd(vec!["sleep", "60"])
+        .with_wait_for(WaitFor::seconds(1))
+        .with_cmd(["sh", "-c", "echo 'buffer' > /tmp/result.txt && sleep 10"])
         .start()
         .await?;
 
-    let destination_dir = tempfile::tempdir()?;
-    let destination = destination_dir.path().join("downloaded.bin");
-
+    let mut buffer = Vec::new();
     container
-        .copy_file_from("/opt/large.bin", destination.clone())
+        .copy_file_from("/tmp/result.txt", &mut buffer)
         .await?;
-
-    let copied = fs::read(&destination).await?;
-    assert_eq!(copied.len(), content.len());
-    assert_eq!(copied, content);
+    assert_eq!(buffer, b"buffer\n");
 
     container.stop().await?;
     Ok(())

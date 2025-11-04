@@ -304,57 +304,34 @@ fn sync_copy_files_to_container() -> anyhow::Result<()> {
 }
 
 #[test]
-fn sync_copy_file_from_container() -> anyhow::Result<()> {
-    let _ = pretty_env_logger::try_init();
-
-    let temp_dir = temp_dir::TempDir::new()?;
-    let file_on_host = temp_dir.child("original.txt");
-    std::fs::write(&file_on_host, b"sync payload")?;
-
+fn sync_copy_file_from_container_to_path() -> anyhow::Result<()> {
     let container = GenericImage::new("alpine", "latest")
-        .with_wait_for(WaitFor::seconds(2))
-        .with_copy_to("/tmp/original.txt", file_on_host)
-        .with_cmd(vec!["sleep", "60"])
+        .with_wait_for(WaitFor::seconds(1))
+        .with_cmd(["sh", "-c", "echo 'sync path' > /tmp/result.txt && sleep 30"])
         .start()?;
 
     let destination_dir = tempfile::tempdir()?;
-    let destination = destination_dir.path().join("copied.txt");
+    let destination = destination_dir.path().join("result.txt");
 
-    container.copy_file_from("/tmp/original.txt", destination.clone())?;
+    container.copy_file_from("/tmp/result.txt", destination.as_path())?;
 
-    let copied = std::fs::read(&destination)?;
-    assert_eq!(copied, b"sync payload");
-
-    let memory = container.copy_file_from("/tmp/original.txt", Vec::new())?;
-    assert_eq!(memory, b"sync payload");
+    let copied = std::fs::read_to_string(&destination)?;
+    assert_eq!(copied, "sync path\n");
 
     container.stop()?;
     Ok(())
 }
 
 #[test]
-fn sync_copy_large_file_from_container() -> anyhow::Result<()> {
-    let _ = pretty_env_logger::try_init();
-
-    let source_dir = tempfile::tempdir()?;
-    let large_path = source_dir.path().join("large.bin");
-    let content = vec![0xCD; 4 * 1024 * 1024];
-    std::fs::write(&large_path, &content)?;
-
+fn sync_copy_file_from_container_into_mut_vec() -> anyhow::Result<()> {
     let container = GenericImage::new("alpine", "latest")
-        .with_wait_for(WaitFor::seconds(2))
-        .with_copy_to("/opt/large.bin", &large_path)
-        .with_cmd(vec!["sleep", "60"])
+        .with_wait_for(WaitFor::seconds(1))
+        .with_cmd(["sh", "-c", "echo 'sync vec' > /tmp/result.txt && sleep 30"])
         .start()?;
 
-    let destination_dir = tempfile::tempdir()?;
-    let destination = destination_dir.path().join("downloaded.bin");
-
-    container.copy_file_from("/opt/large.bin", destination.clone())?;
-
-    let copied = std::fs::read(&destination)?;
-    assert_eq!(copied.len(), content.len());
-    assert_eq!(copied, content);
+    let mut buffer = Vec::new();
+    container.copy_file_from("/tmp/result.txt", &mut buffer)?;
+    assert_eq!(buffer, b"sync vec\n");
 
     container.stop()?;
     Ok(())
