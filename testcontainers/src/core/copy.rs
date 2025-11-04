@@ -1,13 +1,7 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use tokio::{
-    fs,
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_tar::EntryType;
 
 #[derive(Debug, Clone)]
@@ -29,7 +23,7 @@ pub enum CopyDataSource {
 #[derive(Debug, thiserror::Error)]
 pub enum CopyFromContainerError {
     #[error("io failed with error: {0}")]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
     #[error("archive did not contain any regular files")]
     EmptyArchive,
     #[error("archive contained multiple files, but only one was expected")]
@@ -125,7 +119,7 @@ impl CopyFileFromContainer for &Path {
             }
         }
 
-        let mut file = fs::File::create(self)
+        let mut file = tokio::fs::File::create(self)
             .await
             .map_err(CopyFromContainerError::Io)?;
 
@@ -141,7 +135,7 @@ impl CopyFileFromContainer for &Path {
 #[derive(Debug, thiserror::Error)]
 pub enum CopyToContainerError {
     #[error("io failed with error: {0}")]
-    IoError(io::Error),
+    IoError(std::io::Error),
     #[error("failed to get the path name: {0}")]
     PathNameError(String),
 }
@@ -345,7 +339,7 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(CopyToContainerError::IoError(err)) = result {
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         } else {
             panic!("Expected IoError");
         }
