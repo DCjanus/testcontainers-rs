@@ -131,8 +131,6 @@ pub enum ClientError {
     UploadToContainerError(BollardError),
     #[error("failed to prepare data for copy-to-container: {0}")]
     CopyToContainerError(CopyToContainerError),
-    #[error("failed to download data from container: {0}")]
-    DownloadFromContainerError(BollardError),
     #[error("failed to handle data copied from container: {0}")]
     CopyFromContainerError(CopyFromContainerError),
 }
