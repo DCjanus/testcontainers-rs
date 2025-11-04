@@ -40,10 +40,18 @@ pub enum CopyFromContainerError {
     UnsupportedEntry(EntryType),
 }
 
+/// Abstraction for materializing the bytes read from a source into a concrete destination.
+///
+/// Implementors typically persist the incoming bytes to disk or buffer them in memory and then
+/// return a value that callers can work with (for example, the path that was written or the
+/// collected bytes). Implementations must consume the provided reader until EOF or return an error.
 #[async_trait(?Send)]
 pub trait CopyFileFromContainer {
     type Output;
 
+    /// Writes all bytes from the reader into `self`, returning a value that represents the completed operation.
+    ///
+    /// Implementations may mutate `self` and must propagate I/O errors via [`CopyFromContainerError`].
     async fn copy_from_reader<R>(self, reader: R) -> Result<Self::Output, CopyFromContainerError>
     where
         R: AsyncRead + Unpin;
