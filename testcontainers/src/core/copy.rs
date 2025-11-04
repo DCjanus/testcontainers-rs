@@ -129,35 +129,6 @@ impl CopyFileFromContainer for PathBuf {
     }
 }
 
-/// Extracts exactly one regular file from the tar payload coming from the container and
-/// writes it to the provided destination path on the host filesystem.
-#[cfg(test)]
-pub(crate) async fn copy_single_file_from_tar_to_path<R>(
-    reader: R,
-    destination_path: impl AsRef<Path>,
-    container_path: impl AsRef<str>,
-) -> Result<(), CopyFromContainerError>
-where
-    R: AsyncRead + Unpin,
-{
-    let destination = destination_path.as_ref().to_path_buf();
-    copy_single_file_from_tar_into(reader, container_path, destination).await?;
-    Ok(())
-}
-
-/// Extracts exactly one regular file from the tar payload coming from the container and
-/// returns its contents as a byte vector.
-#[cfg(test)]
-pub(crate) async fn copy_single_file_from_tar_to_bytes<R>(
-    reader: R,
-    container_path: impl AsRef<str>,
-) -> Result<Vec<u8>, CopyFromContainerError>
-where
-    R: AsyncRead + Unpin,
-{
-    copy_single_file_from_tar_into(reader, container_path, Vec::new()).await
-}
-
 pub(crate) async fn copy_single_file_from_tar_into<R, T>(
     reader: R,
     container_path: impl AsRef<str>,
@@ -415,7 +386,6 @@ mod tests {
     use std::{fs::File, io::Write};
 
     use tempfile::tempdir;
-    use tokio::fs;
 
     use super::*;
 
@@ -480,108 +450,4 @@ mod tests {
         assert!(!bytes.is_empty());
     }
 
-    #[tokio::test]
-    async fn copy_from_stream_write_to_file_success() {
-        use futures::stream;
-        use tokio_util::io::StreamReader;
-
-        let data = b"hello world".to_vec();
-        let copy_to_container = CopyToContainer::new(data.clone(), "payload.txt");
-        let bytes = copy_to_container.tar().await.unwrap();
-
-        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes)]);
-        let reader = StreamReader::new(stream);
-
-        let temp_dir = tempdir().unwrap();
-        let destination_path = temp_dir.path().join("out.txt");
-        copy_single_file_from_tar_to_path(reader, &destination_path, "payload.txt")
-            .await
-            .unwrap();
-
-        let written = fs::read(&destination_path).await.unwrap();
-        assert_eq!(written, data);
-    }
-
-    #[tokio::test]
-    async fn copy_from_stream_write_to_memory_success() {
-        use futures::stream;
-        use tokio_util::io::StreamReader;
-
-        let data = b"hello world".to_vec();
-        let copy_to_container = CopyToContainer::new(data.clone(), "payload.txt");
-        let bytes = copy_to_container.tar().await.unwrap();
-
-        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes)]);
-        let reader = StreamReader::new(stream);
-
-        let buffer = copy_single_file_from_tar_to_bytes(reader, "payload.txt")
-            .await
-            .unwrap();
-        assert_eq!(buffer, data);
-    }
-
-    #[tokio::test]
-    async fn copy_from_stream_rejects_multiple_files() {
-        use futures::stream;
-        use tokio_util::io::StreamReader;
-
-        let collection = CopyToContainerCollection::new(vec![
-            CopyToContainer::new(vec![1u8], "dir/file1.txt"),
-            CopyToContainer::new(vec![2u8], "dir/file2.txt"),
-        ]);
-        let bytes = collection.tar().await.unwrap();
-
-        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes)]);
-        let reader = StreamReader::new(stream);
-
-        let temp_dir = tempdir().unwrap();
-        let destination_path = temp_dir.path().join("out.txt");
-        let err = copy_single_file_from_tar_to_path(reader, &destination_path, "dir/file1.txt")
-            .await
-            .unwrap_err();
-        match err {
-            CopyFromContainerError::ContainerPathMismatch {
-                container_path,
-                resolved_path,
-            } => {
-                assert_eq!(container_path, "dir/file1.txt");
-                assert_eq!(resolved_path, PathBuf::from("dir/file2.txt"));
-            }
-            other => panic!("expected ContainerPathMismatch error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn copy_from_stream_rejects_directory_target() {
-        use futures::stream;
-        use tokio_util::io::StreamReader;
-
-        let temp_dir = tempdir().unwrap();
-        let dir_path = temp_dir.path().join("dir");
-        fs::create_dir(&dir_path).await.unwrap();
-        let file_path = dir_path.join("file.txt");
-        fs::write(&file_path, b"data").await.unwrap();
-
-        let mut builder = tokio_tar::Builder::new(Vec::new());
-        builder.append_dir_all("dir", &dir_path).await.unwrap();
-        let bytes = builder.into_inner().await.unwrap();
-
-        let stream = stream::iter(vec![Ok::<bytes::Bytes, io::Error>(bytes::Bytes::from(
-            bytes,
-        ))]);
-        let reader = StreamReader::new(stream);
-
-        let destination_path = temp_dir.path().join("out.txt");
-
-        let err = copy_single_file_from_tar_to_path(reader, &destination_path, "/dir")
-            .await
-            .unwrap_err();
-
-        match err {
-            CopyFromContainerError::ContainerPathIsDirectory { container_path } => {
-                assert_eq!(container_path, "/dir");
-            }
-            other => panic!("expected ContainerPathIsDirectory error, got {other:?}"),
-        }
-    }
 }
