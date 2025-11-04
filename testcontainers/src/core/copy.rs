@@ -167,18 +167,7 @@ where
     R: AsyncRead + Unpin,
     T: CopyFileFromContainer,
 {
-    write_single_file_from_tar(reader, container_path.as_ref(), target).await
-}
-
-async fn write_single_file_from_tar<R, T>(
-    reader: R,
-    container_path: &str,
-    target: T,
-) -> Result<T::Output, CopyFromContainerError>
-where
-    R: AsyncRead + Unpin,
-    T: CopyFileFromContainer,
-{
+    let container_path = container_path.as_ref();
     let normalized_container_path = normalize_container_path(container_path);
     let mut archive = AsyncTarArchive::new(reader);
     let mut entries = archive.entries().map_err(CopyFromContainerError::Io)?;
