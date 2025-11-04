@@ -182,13 +182,12 @@ where
         Ok(exit_code)
     }
 
-    /// Copies a single regular file from the container into an arbitrary target implementing [`CopyFileFromContainer`].
+    /// Copies a single file from the container into an arbitrary target implementing [`CopyFileFromContainer`].
     ///
     /// # Behavior
-    /// - Regular files are streamed directly into the provided target (e.g. `PathBuf`, `Vec<u8>`).
-    /// - If `container_path` resolves to a directory, an error is returned and nothing is written.
-    /// - Symlinks follow the Docker `GET /containers/{id}/archive` endpoint semantics; no extra handling
-    ///   is performed by this helper.
+    /// - Regular files are streamed directly into the target (e.g. `PathBuf`, `Vec<u8>`).
+    /// - If `container_path` resolves to a directory, an error is returned and no data is written.
+    /// - Symlink handling follows Docker's `GET /containers/{id}/archive` endpoint behavior without extra processing.
     pub async fn copy_file_from<T>(
         &self,
         container_path: impl Into<String>,
