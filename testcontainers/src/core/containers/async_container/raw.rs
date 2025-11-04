@@ -39,7 +39,7 @@ impl RawContainer {
         self.docker_client.ports(&self.id).await.map_err(Into::into)
     }
 
-    pub async fn copy_file_from_into<T>(
+    pub async fn copy_file_from<T>(
         &self,
         container_path: impl Into<String>,
         target: T,
@@ -49,7 +49,7 @@ impl RawContainer {
     {
         let container_path = container_path.into();
         self.docker_client
-            .copy_file_from_container_into(self.id(), &container_path, target)
+            .copy_file_from_container(self.id(), &container_path, target)
             .await
             .map_err(TestcontainersError::from)
     }

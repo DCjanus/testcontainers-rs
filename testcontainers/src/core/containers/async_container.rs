@@ -198,7 +198,7 @@ where
         T: CopyFileFromContainer,
     {
         let container_path = container_path.into();
-        self.raw.copy_file_from_into(container_path, target).await
+        self.raw.copy_file_from(container_path, target).await
     }
 
     /// Removes the container.

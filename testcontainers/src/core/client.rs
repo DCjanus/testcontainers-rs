@@ -412,7 +412,7 @@ impl Client {
             .map_err(ClientError::UploadToContainerError)
     }
 
-    pub(crate) async fn copy_file_from_container_into<T>(
+    pub(crate) async fn copy_file_from_container<T>(
         &self,
         container_id: impl AsRef<str>,
         container_path: impl AsRef<str>,
