@@ -63,15 +63,13 @@ impl CopyFileFromContainer for Vec<u8> {
 
     async fn copy_from_reader<R>(
         mut self,
-        mut reader: R,
+        reader: R,
     ) -> Result<Self::Output, CopyFromContainerError>
     where
         R: AsyncRead + Unpin,
     {
-        reader
-            .read_to_end(&mut self)
-            .await
-            .map_err(CopyFromContainerError::Io)?;
+        let mut_ref = &mut self;
+        mut_ref.copy_from_reader(reader).await?;
         Ok(self)
     }
 }
