@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, path::Path, str::FromStr, sync::Arc};
+use std::{collections::HashMap, io, str::FromStr, sync::Arc};
 
 use bollard::{
     auth::DockerCredentials,
@@ -29,8 +29,8 @@ use url::Url;
 use crate::core::{
     client::exec::ExecResult,
     copy::{
-        copy_single_file_from_tar_to_bytes, copy_single_file_from_tar_to_path,
-        CopyFromContainerError, CopyToContainer, CopyToContainerCollection, CopyToContainerError,
+        copy_single_file_from_tar_into, CopyFileFromContainer, CopyFromContainerError,
+        CopyToContainer, CopyToContainerCollection, CopyToContainerError,
     },
     env::{self, ConfigurationError},
     logs::{
@@ -408,12 +408,15 @@ impl Client {
             .map_err(ClientError::UploadToContainerError)
     }
 
-    pub(crate) async fn copy_file_from_container(
+    pub(crate) async fn copy_file_from_container_into<T>(
         &self,
         container_id: impl AsRef<str>,
         container_path: impl AsRef<str>,
-        destination: impl AsRef<Path>,
-    ) -> Result<(), ClientError> {
+        target: T,
+    ) -> Result<T::Output, ClientError>
+    where
+        T: CopyFileFromContainer,
+    {
         let container_id = container_id.as_ref();
         let container_path = container_path.as_ref().to_owned();
         let options = DownloadFromContainerOptionsBuilder::new()
@@ -427,30 +430,7 @@ impl Client {
 
         let reader = StreamReader::new(stream);
 
-        copy_single_file_from_tar_to_path(reader, destination, &container_path)
-            .await
-            .map_err(ClientError::CopyFromContainerError)
-    }
-
-    pub(crate) async fn copy_file_from_container_to_bytes(
-        &self,
-        container_id: impl AsRef<str>,
-        container_path: impl AsRef<str>,
-    ) -> Result<Vec<u8>, ClientError> {
-        let container_id = container_id.as_ref();
-        let container_path = container_path.as_ref().to_owned();
-        let options = DownloadFromContainerOptionsBuilder::new()
-            .path(&container_path)
-            .build();
-
-        let stream = self
-            .bollard
-            .download_from_container(container_id, Some(options))
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err));
-
-        let reader = StreamReader::new(stream);
-
-        copy_single_file_from_tar_to_bytes(reader, &container_path)
+        copy_single_file_from_tar_into(reader, &container_path, target)
             .await
             .map_err(ClientError::CopyFromContainerError)
     }

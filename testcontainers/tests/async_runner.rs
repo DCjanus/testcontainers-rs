@@ -309,14 +309,14 @@ async fn async_copy_file_from_container() -> anyhow::Result<()> {
     let destination = destination_dir.path().join("copied.txt");
 
     container
-        .copy_file_from("/tmp/original.txt", &destination)
+        .copy_file_from("/tmp/original.txt", destination.clone())
         .await?;
 
     let copied = fs::read(&destination).await?;
     assert_eq!(copied, b"container payload");
 
     let memory = container
-        .copy_file_from_to_bytes("/tmp/original.txt")
+        .copy_file_from("/tmp/original.txt", Vec::new())
         .await?;
     assert_eq!(memory, b"container payload");
 
@@ -342,7 +342,7 @@ async fn async_copy_large_file_from_container() -> anyhow::Result<()> {
     let destination = destination_dir.path().join("downloaded.bin");
 
     container
-        .copy_file_from("/opt/large.bin", &destination)
+        .copy_file_from("/opt/large.bin", destination.clone())
         .await?;
 
     let copied = fs::read(&destination).await?;

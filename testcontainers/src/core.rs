@@ -7,7 +7,11 @@ pub use self::{
     },
     containers::*,
     copy::{
-        CopyDataSource, CopyFromContainerError, CopyToContainer, CopyToContainerCollection,
+        CopyDataSource,
+        CopyFileFromContainer,
+        CopyFromContainerError,
+        CopyToContainer,
+        CopyToContainerCollection,
         CopyToContainerError,
     },
     healthcheck::Healthcheck,

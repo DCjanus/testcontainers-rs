@@ -5,7 +5,15 @@ use tokio_stream::StreamExt;
 #[cfg(feature = "host-port-exposure")]
 use super::host::HostPortExposure;
 use crate::{
-    core::{async_drop, client::Client, env, error::Result, network::Network, ContainerState},
+    core::{
+        async_drop,
+        client::Client,
+        copy::CopyFileFromContainer,
+        env,
+        error::Result,
+        network::Network,
+        ContainerState,
+    },
     ContainerRequest, Image,
 };
 
@@ -179,29 +187,23 @@ where
         Ok(exit_code)
     }
 
-    /// Copies a single regular file from the container into the supplied destination path.
+    /// Copies a single regular file from the container into an arbitrary target implementing [`CopyFileFromContainer`].
     ///
     /// # Behavior
-    /// - Regular files are streamed directly into the provided destination path on disk.
+    /// - Regular files are streamed directly into the provided target (e.g. `PathBuf`, `Vec<u8>`).
     /// - If `container_path` resolves to a directory, an error is returned and nothing is written.
     /// - Symlinks follow the Docker `GET /containers/{id}/archive` endpoint semantics; no extra handling
     ///   is performed by this helper.
-    pub async fn copy_file_from(
+    pub async fn copy_file_from<T>(
         &self,
         container_path: impl Into<String>,
-        destination: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
+        target: T,
+    ) -> Result<T::Output>
+    where
+        T: CopyFileFromContainer,
+    {
         let container_path = container_path.into();
-        self.raw.copy_file_from(container_path, destination).await
-    }
-
-    /// Copies a single regular file from the container and returns its bytes.
-    pub async fn copy_file_from_to_bytes(
-        &self,
-        container_path: impl Into<String>,
-    ) -> Result<Vec<u8>> {
-        let container_path = container_path.into();
-        self.raw.copy_file_from_to_bytes(container_path).await
+        self.raw.copy_file_from_into(container_path, target).await
     }
 
     /// Removes the container.

@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufRead, AsyncReadExt};
 use super::{exec, Client};
 use crate::{
     core::{
+        copy::CopyFileFromContainer,
         error::{ContainerMissingInfo, ExecError, Result},
         ports::Ports,
         wait::WaitStrategy,
@@ -44,11 +45,9 @@ impl RawContainer {
         container_path: impl Into<String>,
         destination: impl AsRef<std::path::Path>,
     ) -> Result<()> {
-        let container_path = container_path.into();
-        self.docker_client
-            .copy_file_from_container(self.id(), &container_path, destination)
+        self.copy_file_from_into(container_path, destination.as_ref().to_path_buf())
             .await
-            .map_err(TestcontainersError::from)
+            .map(|_| ())
     }
 
     /// Reads the contents of `container_path` into memory.
@@ -56,9 +55,20 @@ impl RawContainer {
         &self,
         container_path: impl Into<String>,
     ) -> Result<Vec<u8>> {
+        self.copy_file_from_into(container_path, Vec::new()).await
+    }
+
+    pub async fn copy_file_from_into<T>(
+        &self,
+        container_path: impl Into<String>,
+        target: T,
+    ) -> Result<T::Output>
+    where
+        T: CopyFileFromContainer,
+    {
         let container_path = container_path.into();
         self.docker_client
-            .copy_file_from_container_to_bytes(self.id(), &container_path)
+            .copy_file_from_container_into(self.id(), &container_path, target)
             .await
             .map_err(TestcontainersError::from)
     }

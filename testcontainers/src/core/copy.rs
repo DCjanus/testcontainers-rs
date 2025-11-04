@@ -1,13 +1,12 @@
 use std::{
     io,
     path::{Component, Path, PathBuf},
-    pin::Pin,
-    task::{Context, Poll},
 };
 
+use async_trait::async_trait;
 use tokio::{
     fs,
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
 use tokio_stream::StreamExt;
 use tokio_tar::{Archive as AsyncTarArchive, EntryType};
@@ -32,8 +31,8 @@ pub enum CopyDataSource {
 pub enum CopyFromContainerError {
     #[error("io failed with error: {0}")]
     Io(#[from] io::Error),
-    #[error("archive did not contain any regular files; cannot write to {destination}")]
-    EmptyArchive { destination: String },
+    #[error("archive did not contain any regular files")]
+    EmptyArchive,
     #[error("requested container path '{container_path}' is a directory")]
     ContainerPathIsDirectory { container_path: String },
     #[error(
@@ -43,15 +42,96 @@ pub enum CopyFromContainerError {
         container_path: String,
         resolved_path: PathBuf,
     },
-    #[error("archive entry type '{entry_type:?}' is not supported for destination {destination}")]
+    #[error("archive entry type '{entry_type:?}' is not supported for requested target")]
     UnsupportedEntryType {
-        destination: String,
         entry_type: EntryType,
     },
 }
 
+#[async_trait(?Send)]
+pub trait CopyFileFromContainer {
+    type Output;
+
+    async fn copy_from_reader<R>(self, reader: R) -> Result<Self::Output, CopyFromContainerError>
+    where
+        R: AsyncRead + Unpin;
+}
+
+#[async_trait(?Send)]
+impl CopyFileFromContainer for Vec<u8> {
+    type Output = Vec<u8>;
+
+    async fn copy_from_reader<R>(
+        mut self,
+        mut reader: R,
+    ) -> Result<Self::Output, CopyFromContainerError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        reader
+            .read_to_end(&mut self)
+            .await
+            .map_err(CopyFromContainerError::Io)?;
+        Ok(self)
+    }
+}
+
+#[async_trait(?Send)]
+impl<'a> CopyFileFromContainer for &'a mut Vec<u8> {
+    type Output = ();
+
+    async fn copy_from_reader<R>(
+        mut self,
+        mut reader: R,
+    ) -> Result<Self::Output, CopyFromContainerError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.clear();
+        reader
+            .read_to_end(&mut self)
+            .await
+            .map_err(CopyFromContainerError::Io)?;
+        Ok(())
+    }
+}
+
+#[async_trait(?Send)]
+impl CopyFileFromContainer for PathBuf {
+    type Output = PathBuf;
+
+    async fn copy_from_reader<R>(
+        self,
+        mut reader: R,
+    ) -> Result<Self::Output, CopyFromContainerError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        if let Some(parent) = self.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .await
+                    .map_err(CopyFromContainerError::Io)?;
+            }
+        }
+
+        let mut file = fs::File::create(&self)
+            .await
+            .map_err(CopyFromContainerError::Io)?;
+
+        tokio::io::copy(&mut reader, &mut file)
+            .await
+            .map_err(CopyFromContainerError::Io)?;
+
+        file.flush().await.map_err(CopyFromContainerError::Io)?;
+
+        Ok(self)
+    }
+}
+
 /// Extracts exactly one regular file from the tar payload coming from the container and
 /// writes it to the provided destination path on the host filesystem.
+#[cfg(test)]
 pub(crate) async fn copy_single_file_from_tar_to_path<R>(
     reader: R,
     destination_path: impl AsRef<Path>,
@@ -60,34 +140,14 @@ pub(crate) async fn copy_single_file_from_tar_to_path<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let destination_path = destination_path.as_ref();
-    if let Some(parent) = destination_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(CopyFromContainerError::Io)?;
-        }
-    }
-
-    let destination_label = destination_path.display().to_string();
-
-    let mut file = fs::File::create(destination_path)
-        .await
-        .map_err(CopyFromContainerError::Io)?;
-
-    write_single_file_from_tar(
-        reader,
-        container_path.as_ref(),
-        &destination_label,
-        &mut file,
-    )
-    .await?;
-
-    file.flush().await.map_err(CopyFromContainerError::Io)
+    let destination = destination_path.as_ref().to_path_buf();
+    copy_single_file_from_tar_into(reader, container_path, destination).await?;
+    Ok(())
 }
 
 /// Extracts exactly one regular file from the tar payload coming from the container and
 /// returns its contents as a byte vector.
+#[cfg(test)]
 pub(crate) async fn copy_single_file_from_tar_to_bytes<R>(
     reader: R,
     container_path: impl AsRef<str>,
@@ -95,31 +155,37 @@ pub(crate) async fn copy_single_file_from_tar_to_bytes<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let mut writer = VecAsyncWriter::default();
-
-    write_single_file_from_tar(reader, container_path.as_ref(), "<memory>", &mut writer).await?;
-
-    Ok(writer.into_inner())
+    copy_single_file_from_tar_into(reader, container_path, Vec::new()).await
 }
 
-async fn write_single_file_from_tar<R, W>(
+pub(crate) async fn copy_single_file_from_tar_into<R, T>(
     reader: R,
-    container_path: &str,
-    destination_label: &str,
-    writer: &mut W,
-) -> Result<(), CopyFromContainerError>
+    container_path: impl AsRef<str>,
+    target: T,
+) -> Result<T::Output, CopyFromContainerError>
 where
     R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin + ?Sized,
+    T: CopyFileFromContainer,
 {
-    let container_path = container_path.as_ref();
+    write_single_file_from_tar(reader, container_path.as_ref(), target).await
+}
+
+async fn write_single_file_from_tar<R, T>(
+    reader: R,
+    container_path: &str,
+    target: T,
+) -> Result<T::Output, CopyFromContainerError>
+where
+    R: AsyncRead + Unpin,
+    T: CopyFileFromContainer,
+{
     let normalized_container_path = normalize_container_path(container_path);
     let mut archive = AsyncTarArchive::new(reader);
     let mut entries = archive.entries().map_err(CopyFromContainerError::Io)?;
-    let mut file_written = false;
+    let mut maybe_target = Some(target);
 
     while let Some(entry_result) = entries.next().await {
-        let mut entry = entry_result.map_err(CopyFromContainerError::Io)?;
+        let entry = entry_result.map_err(CopyFromContainerError::Io)?;
         let entry_type = entry.header().entry_type();
 
         if entry_type.is_file() || entry_type.is_contiguous() {
@@ -133,15 +199,11 @@ where
                 });
             }
 
-            if file_written {
-                continue;
-            }
+            let target = maybe_target
+                .take()
+                .expect("CopyFileFromContainer target unexpectedly consumed");
 
-            tokio::io::copy(&mut entry, writer)
-                .await
-                .map_err(CopyFromContainerError::Io)?;
-
-            file_written = true;
+            return target.copy_from_reader(entry).await;
         } else if entry_type.is_dir()
             || entry_type.is_gnu_longname()
             || entry_type.is_gnu_longlink()
@@ -162,50 +224,11 @@ where
 
             continue;
         } else {
-            return Err(CopyFromContainerError::UnsupportedEntryType {
-                destination: destination_label.to_string(),
-                entry_type,
-            });
+            return Err(CopyFromContainerError::UnsupportedEntryType { entry_type });
         }
     }
 
-    if file_written {
-        writer.flush().await.map_err(CopyFromContainerError::Io)
-    } else {
-        Err(CopyFromContainerError::EmptyArchive {
-            destination: destination_label.to_string(),
-        })
-    }
-}
-
-#[derive(Default)]
-struct VecAsyncWriter {
-    buffer: Vec<u8>,
-}
-
-impl VecAsyncWriter {
-    fn into_inner(self) -> Vec<u8> {
-        self.buffer
-    }
-}
-
-impl AsyncWrite for VecAsyncWriter {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, io::Error>> {
-        self.buffer.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        Poll::Ready(Ok(()))
-    }
+    Err(CopyFromContainerError::EmptyArchive)
 }
 
 fn normalize_container_path(path: &str) -> PathBuf {

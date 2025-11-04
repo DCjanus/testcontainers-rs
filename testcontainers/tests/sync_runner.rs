@@ -320,12 +320,12 @@ fn sync_copy_file_from_container() -> anyhow::Result<()> {
     let destination_dir = tempfile::tempdir()?;
     let destination = destination_dir.path().join("copied.txt");
 
-    container.copy_file_from("/tmp/original.txt", &destination)?;
+    container.copy_file_from("/tmp/original.txt", destination.clone())?;
 
     let copied = std::fs::read(&destination)?;
     assert_eq!(copied, b"sync payload");
 
-    let memory = container.copy_file_from_to_bytes("/tmp/original.txt")?;
+    let memory = container.copy_file_from("/tmp/original.txt", Vec::new())?;
     assert_eq!(memory, b"sync payload");
 
     container.stop()?;
@@ -350,7 +350,7 @@ fn sync_copy_large_file_from_container() -> anyhow::Result<()> {
     let destination_dir = tempfile::tempdir()?;
     let destination = destination_dir.path().join("downloaded.bin");
 
-    container.copy_file_from("/opt/large.bin", &destination)?;
+    container.copy_file_from("/opt/large.bin", destination.clone())?;
 
     let copied = std::fs::read(&destination)?;
     assert_eq!(copied.len(), content.len());

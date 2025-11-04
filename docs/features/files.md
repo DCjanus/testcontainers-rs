@@ -34,16 +34,16 @@ let container = GenericImage::new("alpine", "latest")
 
 let destination = tempdir()?.path().join("result.txt");
 container
-    .copy_file_from("/tmp/result.txt", &destination)
+    .copy_file_from("/tmp/result.txt", destination.clone())
     .await?;
 assert_eq!(tokio::fs::read_to_string(&destination).await?, "42\n");
 ```
 
-- `copy_file_from` downloads the requested path, validates that the archive resolves to that regular file, and writes the payload directly to the supplied host path.
-- Call `copy_file_from_to_bytes` when you prefer to capture the file contents in-memory: `let bytes = container.copy_file_from_to_bytes("/tmp/result.txt").await?;`.
-- Both helpers apply the same validation semantics, returning an error when the container path resolves to a directory or the archive contains unexpected entries.
+- `copy_file_from` downloads the requested path, validates that the archive resolves to that regular file, and materializes it into any target that implements `CopyFileFromContainer` (e.g. `PathBuf`, `Vec<u8>`, `&mut Vec<u8>`).
+- Capture the payload in-memory with `let bytes: Vec<u8> = container.copy_file_from("/tmp/result.txt", Vec::new()).await?;`.
+- The helper applies strict validation semantics, returning an error when the container path resolves to a directory or the archive contains unexpected entries.
 
-The blocking `Container` type offers the same pair of helpers.
+The blocking `Container` type offers the same `copy_file_from` API.
 
 ## Mounts For Writable Workspaces
 
