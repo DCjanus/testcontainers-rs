@@ -39,25 +39,6 @@ impl RawContainer {
         self.docker_client.ports(&self.id).await.map_err(Into::into)
     }
 
-    /// Writes the contents of `container_path` to a single file on the host.
-    pub async fn copy_file_from(
-        &self,
-        container_path: impl Into<String>,
-        destination: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
-        self.copy_file_from_into(container_path, destination.as_ref().to_path_buf())
-            .await
-            .map(|_| ())
-    }
-
-    /// Reads the contents of `container_path` into memory.
-    pub async fn copy_file_from_to_bytes(
-        &self,
-        container_path: impl Into<String>,
-    ) -> Result<Vec<u8>> {
-        self.copy_file_from_into(container_path, Vec::new()).await
-    }
-
     pub async fn copy_file_from_into<T>(
         &self,
         container_path: impl Into<String>,
