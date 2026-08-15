@@ -7,8 +7,8 @@ use bollard::{
     errors::Error as BollardError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
     models::{
-        ContainerCreateBody, ContainerInspectResponse, ExecInspectResponse, NetworkCreateRequest,
-        NetworkInspect,
+        BuildInfo, BuildInfoAux, ContainerCreateBody, ContainerInspectResponse,
+        ExecInspectResponse, NetworkCreateRequest, NetworkInspect,
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
@@ -54,6 +54,155 @@ static IN_A_CONTAINER: OnceCell<bool> = OnceCell::const_new();
 
 type BuildLockMap = Mutex<HashMap<String, Arc<Mutex<()>>>>;
 static BUILD_LOCKS: OnceCell<BuildLockMap> = OnceCell::const_new();
+
+#[derive(Default)]
+struct BuildProgressLogger {
+    reported_vertexes: HashMap<String, u8>,
+    reported_progress: HashMap<(String, String), (u8, bool)>,
+}
+
+impl BuildProgressLogger {
+    fn log(&mut self, build_info: BuildInfo) {
+        if let Some(stream) = build_info.stream {
+            log::info!("{stream}");
+        }
+
+        let Some(aux) = build_info.aux else {
+            return;
+        };
+
+        match aux {
+            BuildInfoAux::BuildKit(status) => {
+                for vertex in status.vertexes {
+                    let key = if vertex.digest.is_empty() {
+                        vertex.name.clone()
+                    } else {
+                        vertex.digest.clone()
+                    };
+                    let state = if !vertex.error.is_empty() {
+                        3
+                    } else if vertex.completed.is_some() {
+                        2
+                    } else if vertex.started.is_some() {
+                        1
+                    } else {
+                        0
+                    };
+                    if state == 0
+                        || self
+                            .reported_vertexes
+                            .get(&key)
+                            .is_some_and(|reported| *reported >= state)
+                    {
+                        continue;
+                    }
+                    self.reported_vertexes.insert(key, state);
+
+                    if !vertex.error.is_empty() {
+                        log::error!("BuildKit: {}: {}", vertex.name, vertex.error);
+                    } else if vertex.completed.is_some() {
+                        let result = if vertex.cached { "cached" } else { "done" };
+                        log::info!("BuildKit: {} ({result})", vertex.name);
+                    } else if vertex.started.is_some() {
+                        log::info!("BuildKit: {}", vertex.name);
+                    }
+                }
+
+                for progress in status.statuses {
+                    let key = (progress.id.clone(), progress.name.clone());
+                    let percentage = if progress.total > 0 {
+                        ((i128::from(progress.current.max(0)) * 100 / i128::from(progress.total))
+                            .clamp(0, 100)) as u8
+                    } else if progress.completed.is_some() {
+                        100
+                    } else {
+                        0
+                    };
+                    let bucket = percentage / 10;
+                    let completed = progress.completed.is_some();
+                    let completion_state = completed && progress.total <= 0;
+
+                    if self.reported_progress.get(&key) == Some(&(bucket, completion_state)) {
+                        continue;
+                    }
+                    self.reported_progress
+                        .insert(key, (bucket, completion_state));
+
+                    let label = match progress.id.strip_prefix("sha256:") {
+                        Some(digest) => {
+                            let digest = digest.chars().take(12).collect::<String>();
+                            if progress.name.is_empty() {
+                                format!("layer {digest}")
+                            } else {
+                                format!("{} {digest}", progress.name)
+                            }
+                        }
+                        None if progress.id.is_empty() => {
+                            if progress.name.is_empty() {
+                                "progress".to_string()
+                            } else {
+                                progress.name
+                            }
+                        }
+                        None if progress.name.is_empty()
+                            || progress.id.starts_with(&progress.name) =>
+                        {
+                            progress.id
+                        }
+                        None => format!("{} {}", progress.name, progress.id),
+                    };
+                    let completion = if completed { " (done)" } else { "" };
+                    if progress.total > 0 {
+                        log::info!(
+                            "BuildKit: {label}: {}/{} bytes ({}%){completion}",
+                            progress.current,
+                            progress.total,
+                            percentage
+                        );
+                    } else {
+                        log::info!("BuildKit: {label}: {} bytes{completion}", progress.current);
+                    }
+                }
+
+                for output in status.logs {
+                    let message = String::from_utf8_lossy(&output.msg);
+                    let message = message.trim_end_matches(['\n', '\r']);
+                    if !message.is_empty() {
+                        log::info!("BuildKit: {message}");
+                    }
+                }
+
+                for warning in status.warnings {
+                    let short = String::from_utf8_lossy(&warning.short);
+                    let details = warning
+                        .detail
+                        .iter()
+                        .map(|detail| String::from_utf8_lossy(detail))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    log::warn!(
+                        "BuildKit: {short}{}{}",
+                        if details.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n{details}")
+                        },
+                        if warning.url.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n{}", warning.url)
+                        }
+                    );
+                }
+            }
+            BuildInfoAux::Default(image) => {
+                if let Some(id) = image.id {
+                    log::debug!("Built image: {id}");
+                }
+            }
+        }
+    }
+}
 
 async fn get_build_lock(descriptor: &str) -> Arc<Mutex<()>> {
     let locks = BUILD_LOCKS
@@ -597,14 +746,11 @@ impl Client {
         let mut building =
             self.bollard
                 .build_image(build_options, credentials, Some(body_full(tar)));
+        let mut progress_logger = BuildProgressLogger::default();
 
         while let Some(result) = building.next().await {
             match result {
-                Ok(r) => {
-                    if let Some(s) = r.stream {
-                        log::info!("{}", s);
-                    }
-                }
+                Ok(build_info) => progress_logger.log(build_info),
                 Err(err) => {
                     log::error!("{:?}", err);
                     return Err(ClientError::BuildImage {
